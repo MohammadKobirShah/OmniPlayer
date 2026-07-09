@@ -1,0 +1,49 @@
+{
+  "name": "omnistream-player",
+  "version": "1.0.0",
+  "description": "Production-grade headless Shaka player with a premium glassmorphism IPTV UI — embeddable like Shaka.",
+  "license": "MIT",
+  "author": "OmniStream",
+  "type": "module",
+  "main": "./dist-lib/omnistream.umd.js",
+  "module": "./dist-lib/omnistream.es.js",
+  "unpkg": "./dist-lib/omnistream.umd.js",
+  "jsdelivr": "./dist-lib/omnistream.umd.js",
+  "types": "./dist-lib/embed.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist-lib/omnistream.es.js",
+      "require": "./dist-lib/omnistream.umd.js",
+      "default": "./dist-lib/omnistream.umd.js"
+    },
+    "./style.css": "./dist-lib/omnistream.css",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist-lib",
+    "README.md"
+  ],
+  "sideEffects": [
+    "*.css"
+  ],
+  "scripts": {
+    "dev": "vite",
+    "build:lib": "vite build --config library/vite.lib.config.ts",
+    "build:types": "tsc --emitDeclarationOnly --declaration --outDir dist-lib src/embed.tsx",
+    "prepublishOnly": "npm run build:lib && npm run build:types"
+  },
+  "keywords": [
+    "shaka",
+    "shaka-player",
+    "video",
+    "player",
+    "dash",
+    "hls",
+    "drm",
+    "widevine",
+    "iptv",
+    "ott",
+    "glassmorphism",
+    "embed"
+  ]
+}

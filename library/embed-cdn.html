@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OmniStream — CDN embed example</title>
+
+    <!-- 1) Load the single CSS file (or use a CDN like unpkg/jsdelivr) -->
+    <link rel="stylesheet" href="./omnistream.css" />
+
+    <style>
+      body {
+        margin: 0;
+        background: #0b0b0b;
+        font-family: system-ui, sans-serif;
+      }
+      .stage {
+        /* The host must set its own size + position:relative for embed mode. */
+        position: relative;
+        width: min(960px, 92vw);
+        aspect-ratio: 16 / 9;
+        margin: 40px auto;
+        border-radius: 16px;
+        overflow: hidden;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- ============ Option A: JavaScript API ============ -->
+    <div id="player" class="stage"></div>
+
+    <!-- ============ Option B: Declarative (auto-mounted) ============ -->
+    <!--
+    <div
+      class="stage"
+      data-omni-source="https://storage.googleapis.com/shaka-demo-assets/angel-one/dash.mpd"
+      data-omni-title="Angel One"
+      data-omni-glyph="🚀"
+    ></div>
+    -->
+
+    <!-- 2) Load the player bundle (UMD exposes window.OmniStream) -->
+    <script src="./omnistream.umd.js"></script>
+    <script>
+      // 3) Mount + control
+      const player = OmniStream.mount('#player', {
+        manifest: 'https://storage.googleapis.com/shaka-demo-assets/angel-one/dash.mpd',
+        title: 'Angel One',
+        glyph: '🚀',
+        // drm: { servers: { 'com.widevine.alpha': 'https://cwip-shaka-proxy.appspot.com/no_auth' } }
+      });
+
+      player.on('ready', () => console.log('OmniStream ready'));
+      player.on('error', (e) => console.error('OmniStream error', e));
+
+      // Programmatic control:
+      // player.play(); player.seekBy(-10); player.setVolume(0.8);
+    </script>
+  </body>
+</html>
