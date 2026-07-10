@@ -184,6 +184,17 @@ export default function IptvDrawer({ open, onClose, onSelect }: Props) {
                   <span className="omni-channel-num">{c.number || idx + 1}</span>
                   <span className="omni-channel-logo" style={{ background: c.gradient }}>
                     {c.glyph}
+                    {c.logo && (
+                      <img
+                        src={c.logo}
+                        alt=""
+                        loading="lazy"
+                        referrerPolicy="no-referrer"
+                        onError={(e) => {
+                          (e.currentTarget as HTMLImageElement).style.display = 'none';
+                        }}
+                      />
+                    )}
                   </span>
                   <span className="omni-channel-meta">
                     <span className="omni-channel-name">{c.name}</span>

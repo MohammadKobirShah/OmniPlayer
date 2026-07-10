@@ -16,6 +16,13 @@ export interface IptvChannel {
   drm?: DrmConfig;
   isLive?: boolean;
   description?: string;
+  /**
+   * Custom HTTP headers required by protected IPTV streams (Toffee Live, Sony
+   * YAY! VIP, etc.). Parsed from `#EXTVLCOPT` / `#EXTHTTP` directives. Because
+   * browsers forbid setting `User-Agent` / `Cookie` directly, these are routed
+   * through a proxy that re-injects the real headers (see `lib/proxy.ts`).
+   */
+  httpHeaders?: Record<string, string>;
 }
 
 export interface ParsedPlaylist {
@@ -75,6 +82,15 @@ export function glyphFor(name: string): string {
   return letter ? letter.toUpperCase() : '📺';
 }
 
+/** Normalize a header name, e.g. `x-custom` → `X-Custom`. */
+function capitalizeHeader(name: string): string {
+  return name
+    .toLowerCase()
+    .split('-')
+    .map((part) => (part ? part[0].toUpperCase() + part.slice(1) : part))
+    .join('-');
+}
+
 /** Derive a container type ("DASH" | "HLS") from a manifest URL. */
 export function guessContainer(url: string): 'DASH' | 'HLS' {
   const u = (url || '').toLowerCase().split('?')[0];
@@ -112,6 +128,7 @@ export function parseM3U(text: string): ParsedPlaylist {
     tvgId: string | null;
     tvgName: string | null;
     logo: string | null;
+    httpHeaders: Record<string, string>;
   } | null = null;
   let counter = 0;
 
@@ -123,6 +140,7 @@ export function parseM3U(text: string): ParsedPlaylist {
       tvgId: null,
       tvgName: null,
       logo: null,
+      httpHeaders: {},
     };
     channels.push(
       enrich({
@@ -134,6 +152,7 @@ export function parseM3U(text: string): ParsedPlaylist {
         number: counter,
         tvgId: p.tvgId,
         tvgName: p.tvgName,
+        httpHeaders: Object.keys(p.httpHeaders).length ? p.httpHeaders : undefined,
       }),
     );
     pending = null;
@@ -151,10 +170,36 @@ export function parseM3U(text: string): ParsedPlaylist {
         tvgId: attr(line, 'tvg-id'),
         tvgName: attr(line, 'tvg-name'),
         logo: attr(line, 'tvg-logo'),
+        httpHeaders: {},
       };
     } else if (line.toUpperCase().startsWith('#EXTGRP:')) {
       const g = line.slice(line.indexOf(':') + 1).trim();
       if (pending && g) pending.group = g;
+    } else if (line.toUpperCase().startsWith('#EXTVLCOPT:')) {
+      // VLC options, e.g. `#EXTVLCOPT:http-user-agent=<ua>` or `#EXTVLCOPT:http-referrer=<url>`.
+      const opt = line.slice('#EXTVLCOPT:'.length).trim();
+      const eq = opt.indexOf('=');
+      if (pending && eq > 0) {
+        const key = opt.slice(0, eq).trim().toLowerCase();
+        const val = opt.slice(eq + 1).trim();
+        if (key === 'http-user-agent') pending.httpHeaders['User-Agent'] = val;
+        else if (key === 'http-referrer' || key === 'http-referer') pending.httpHeaders['Referer'] = val;
+        else if (key.startsWith('http-')) pending.httpHeaders[capitalizeHeader(key.slice(5))] = val;
+      }
+    } else if (line.toUpperCase().startsWith('#EXTHTTP:')) {
+      // A JSON object of raw HTTP headers, e.g. `#EXTHTTP:{"cookie":"..."}`.
+      if (pending) {
+        try {
+          const obj = JSON.parse(line.slice('#EXTHTTP:'.length).trim());
+          if (obj && typeof obj === 'object') {
+            for (const [k, v] of Object.entries(obj)) {
+              if (typeof v === 'string') pending.httpHeaders[capitalizeHeader(k)] = v;
+            }
+          }
+        } catch {
+          /* malformed #EXTHTTP — ignore */
+        }
+      }
     } else if (!line.startsWith('#')) {
       // A media URL.
       flush(line);
@@ -186,6 +231,13 @@ export function toM3U(channels: IptvChannel[]): string {
       .filter(Boolean)
       .join(' ');
     out.push(`#EXTINF:-1 ${attrs},${c.name}`);
+    // Re-emit VLC + HTTP directives so protected streams round-trip.
+    if (c.httpHeaders) {
+      const ua = c.httpHeaders['User-Agent'];
+      if (ua) out.push(`#EXTVLCOPT:http-user-agent=${ua}`);
+      const { ['User-Agent']: _omit, ...rest } = c.httpHeaders;
+      if (Object.keys(rest).length) out.push(`#EXTHTTP:${JSON.stringify(rest)}`);
+    }
     out.push(c.url);
   }
   return out.join('\n');

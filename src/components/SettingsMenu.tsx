@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { usePlayerStore } from '../store/playerStore';
 import type { ShakaController } from '../hooks/useShakaPlayer';
+import { needsProxy, isForbiddenHeader } from '../lib/proxy';
 import { CheckIcon, CloseIcon } from './icons';
 import { formatBitrate } from '../lib/format';
 
@@ -10,7 +11,7 @@ interface Props {
   controller: ShakaController;
 }
 
-type Tab = 'quality' | 'speed' | 'audio' | 'subs';
+type Tab = 'quality' | 'speed' | 'audio' | 'subs' | 'proxy';
 
 const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2];
 
@@ -26,6 +27,13 @@ export default function SettingsMenu({ open, onClose, controller }: Props) {
     currentTextId,
     playbackRate,
   } = usePlayerStore();
+  const proxyBase = usePlayerStore((s) => s.proxyBase);
+  const setProxyBase = usePlayerStore((s) => s.setProxyBase);
+  const channels = usePlayerStore((s) => s.iptvChannels);
+  const activeChannelId = usePlayerStore((s) => s.activeChannelId);
+  const activeChannel = channels.find((c) => c.id === activeChannelId);
+  const headers = activeChannel?.httpHeaders;
+  const [proxyInput, setProxyInput] = useState(proxyBase);
 
   if (!open) return null;
 
@@ -34,6 +42,7 @@ export default function SettingsMenu({ open, onClose, controller }: Props) {
     { id: 'speed', label: 'Speed' },
     { id: 'audio', label: 'Audio' },
     { id: 'subs', label: 'Subtitles' },
+    { id: 'proxy', label: 'Proxy' },
   ];
 
   const Row = ({
@@ -141,6 +150,58 @@ export default function SettingsMenu({ open, onClose, controller }: Props) {
               </Row>
             ))}
           </>
+        )}
+
+        {tab === 'proxy' && (
+          <div className="omni-proxy-panel">
+            <div className="omni-proxy-status">
+              {headers && Object.keys(headers).length > 0 ? (
+                <>
+                  <span className={`omni-proxy-dot ${needsProxy(headers) ? 'is-warn' : 'is-ok'}`} />
+                  <span>
+                    {needsProxy(headers) ? 'Protected stream — proxy required' : 'Custom headers (direct)'}
+                  </span>
+                </>
+              ) : (
+                <>
+                  <span className="omni-proxy-dot is-ok" />
+                  <span>No custom headers on this channel.</span>
+                </>
+              )}
+            </div>
+
+            {headers && (
+              <ul className="omni-proxy-headers">
+                {Object.entries(headers).map(([k, v]) => (
+                  <li key={k}>
+                    <span className="omni-proxy-key">{k}</span>
+                    <span className="omni-proxy-val">{isForbiddenHeader(k) ? '⚠ forbidden → proxied' : v.slice(0, 32)}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            <label className="omni-proxy-label">Proxy base URL</label>
+            <div className="omni-proxy-input-row">
+              <input
+                className="omni-proxy-input"
+                value={proxyInput}
+                onChange={(e) => setProxyInput(e.target.value)}
+                placeholder="https://your-site.com/proxy"
+                spellCheck={false}
+              />
+              <button
+                className="omni-proxy-save"
+                onClick={() => setProxyBase(proxyInput)}
+              >
+                Save
+              </button>
+            </div>
+            <p className="omni-proxy-note">
+              Browsers can't send <code>User-Agent</code>/<code>Cookie</code> directly. Route through a
+              proxy (see <code>proxy/server.js</code>) which converts the <code>X-</code> headers back.
+            </p>
+          </div>
         )}
       </div>
 

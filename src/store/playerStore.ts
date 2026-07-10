@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import type { IptvChannel } from '../lib/m3u';
 import type { EpgMap } from '../lib/xmltv';
+import { setProxyBase as configureProxyBase } from '../lib/proxy';
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
@@ -141,6 +142,23 @@ export interface PlayerState {
   setTvMode: (v: boolean) => void;
   setReduceMotion: (v: boolean) => void;
 
+  /* ------------------------ Protected-stream proxy --------------------- */
+  proxyBase: string;
+  setProxyBase: (url: string) => void;
+
+  /* ------------------------ Reload nonce (shared) ---------------------- */
+  /** Bumped to force a same-URL reload (Retry button / API reload()). */
+  reloadNonce: number;
+  bumpReload: () => void;
+
+  /* ------------------------- Remote sources ---------------------------- */
+  /** id → human label for each known playlist source. */
+  playlistSources: { id: string; name: string; protected: boolean }[];
+  /** id → load status for each source (for UI feedback). */
+  sourceStatus: Record<string, { status: 'loading' | 'loaded' | 'error'; count: number }>;
+  setPlaylistSources: (s: { id: string; name: string; protected: boolean }[]) => void;
+  setSourceStatus: (id: string, status: { status: 'loading' | 'loaded' | 'error'; count: number }) => void;
+
   resetPlayback: () => void;
 }
 
@@ -193,6 +211,13 @@ export const usePlayerStore = create<PlayerState>((set) => ({
 
   tvMode: false,
   reduceMotion: false,
+
+  proxyBase: '',
+
+  reloadNonce: 0,
+
+  playlistSources: [],
+  sourceStatus: {},
 
   setPlaying: (isPlaying) => set({ isPlaying }),
   setCurrentTime: (currentTime) => set({ currentTime }),
@@ -263,6 +288,7 @@ export const usePlayerStore = create<PlayerState>((set) => ({
     set(() => ({
       activeChannelId: id,
       isDrawerOpen: false,
+      showControls: true,
       isPlaying: false,
       isReady: false,
       isBuffering: false,
@@ -294,6 +320,17 @@ export const usePlayerStore = create<PlayerState>((set) => ({
 
   setTvMode: (tvMode) => set({ tvMode }),
   setReduceMotion: (reduceMotion) => set({ reduceMotion }),
+
+  setProxyBase: (url) => {
+    configureProxyBase(url);
+    set({ proxyBase: url.replace(/\/+$/, '') });
+  },
+
+  bumpReload: () => set((state) => ({ reloadNonce: state.reloadNonce + 1 })),
+
+  setPlaylistSources: (sources) => set({ playlistSources: sources }),
+  setSourceStatus: (id, status) =>
+    set((state) => ({ sourceStatus: { ...state.sourceStatus, [id]: status } })),
 
   resetPlayback: () =>
     set({

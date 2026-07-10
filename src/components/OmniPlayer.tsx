@@ -43,7 +43,6 @@ export default function OmniPlayer({ onExit, embed }: Props) {
   const tapLayerRef = useRef<HTMLDivElement>(null);
   const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const [reloadKey, setReloadKey] = useState(0);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [statsOpen, setStatsOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
@@ -62,8 +61,17 @@ export default function OmniPlayer({ onExit, embed }: Props) {
   const effectiveUri = activeChannel?.url ?? '';
   const effectiveDrm = activeChannel?.drm;
   const effectiveTitle = activeChannel?.name ?? 'OmniStream';
+  const effectiveHeaders = activeChannel?.httpHeaders;
+  const reloadNonce = usePlayerStore((s) => s.reloadNonce);
+  const bumpReload = usePlayerStore((s) => s.bumpReload);
 
-  const controller = useShakaPlayer(videoRef, effectiveUri, effectiveDrm, reloadKey);
+  const controller = useShakaPlayer(
+    videoRef,
+    effectiveUri,
+    effectiveDrm,
+    reloadNonce,
+    effectiveHeaders,
+  );
 
   const isPlaying = usePlayerStore((s) => s.isPlaying);
   const isReady = usePlayerStore((s) => s.isReady);
@@ -428,7 +436,7 @@ export default function OmniPlayer({ onExit, embed }: Props) {
             <h3>{error.message}</h3>
             {error.hint && <p>{error.hint}</p>}
             <div className="omni-error-actions">
-              <button className="omni-error-retry" onClick={() => setReloadKey((k) => k + 1)}>
+              <button className="omni-error-retry" onClick={bumpReload}>
                 Retry
               </button>
               <button className="omni-error-back" onClick={exit}>

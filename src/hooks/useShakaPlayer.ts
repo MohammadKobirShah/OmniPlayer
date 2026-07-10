@@ -4,6 +4,11 @@ import { useShallow } from 'zustand/react/shallow';
 import { usePlayerStore } from '../store/playerStore';
 import { qualityLabel } from '../lib/format';
 import type { DrmConfig } from '../lib/streams';
+import {
+  resolveProxiedRequest,
+  needsProxy as headersNeedProxy,
+  isProxyConfigured,
+} from '../lib/proxy';
 
 /* shaka's compiled stats object – treated loosely for ergonomics. */
 type ShakaStats = {
@@ -68,8 +73,12 @@ export function useShakaPlayer(
   manifestUri: string,
   drmConfig?: DrmConfig,
   reloadKey = 0,
+  httpHeaders?: Record<string, string>,
 ): ShakaController {
   const playerRef = useRef<shaka.Player | null>(null);
+  const headersKey = httpHeaders ? JSON.stringify(httpHeaders) : '';
+  const needsProxy = headersNeedProxy(httpHeaders);
+  const proxyReady = isProxyConfigured();
 
   const store = usePlayerStore(
     useShallow((s) => ({
@@ -201,6 +210,32 @@ export function useShakaPlayer(
       store.setError({ code, category, message, hint, severity: 'fatal' });
     };
 
+    // <video> handlers live at effect scope so cleanup can remove them even
+    // if init is still in flight (avoids leaking listeners across reloads).
+    let onPlay: (() => void) | null = null;
+    let onPause: (() => void) | null = null;
+    let onTime: (() => void) | null = null;
+    let onDuration: (() => void) | null = null;
+    let onWaiting: (() => void) | null = null;
+    let onPlaying: (() => void) | null = null;
+
+    const detachVideoListeners = () => {
+      const v = videoRef.current;
+      if (!v) return;
+      if (onPlay) v.removeEventListener('play', onPlay);
+      if (onPause) v.removeEventListener('pause', onPause);
+      if (onTime) v.removeEventListener('timeupdate', onTime);
+      if (onDuration) {
+        v.removeEventListener('durationchange', onDuration);
+        v.removeEventListener('loadedmetadata', onDuration);
+      }
+      if (onWaiting) v.removeEventListener('waiting', onWaiting);
+      if (onPlaying) {
+        v.removeEventListener('playing', onPlaying);
+        v.removeEventListener('canplay', onPlaying);
+      }
+    };
+
     const init = async () => {
       try {
         player = new shaka.Player();
@@ -235,6 +270,37 @@ export function useShakaPlayer(
           preferredTextLanguage: (navigator.language || 'en').slice(0, 2),
         });
 
+        // === Custom HTTP headers (protected IPTV streams) ===
+        // Browsers forbid setting User-Agent/Cookie/Referer directly, so we
+        // route through a proxy and forward those as X- prefixed headers.
+        if (httpHeaders && Object.keys(httpHeaders).length > 0) {
+          if (needsProxy && !proxyReady) {
+            store.setError({
+              code: 'PROXY_REQUIRED',
+              severity: 'fatal',
+              message: 'This stream requires custom HTTP headers.',
+              hint:
+                'Set a proxy base (Settings → Proxy) so User-Agent/Cookie can be injected server-side.',
+            });
+            throw new Error('Proxy not configured for protected stream.');
+          }
+          const eng = (player as any).getNetworkingEngine?.();
+          eng?.registerRequestFilter((type: number, request: any) => {
+            const Manifest = shaka.net.NetworkingEngine.RequestType.MANIFEST;
+            const Segment = shaka.net.NetworkingEngine.RequestType.SEGMENT;
+            // NOTE: intentionally NOT handling LICENSE — DRM license requests
+            // go to the license server, not the content origin. Routing them
+            // through the content proxy or attaching stream Cookies/User-Agent
+            // would break DRM and leak credentials.
+            if (type !== Manifest && type !== Segment) return;
+            const uri = request.uris?.[0];
+            if (!uri) return;
+            const resolved = resolveProxiedRequest(uri, httpHeaders);
+            request.uris = [resolved.uri];
+            request.headers = { ...(request.headers || {}), ...resolved.safe, ...resolved.proxied };
+          });
+        }
+
         const onBuffering = (e: any) => store.setBuffering(!!e.buffering);
         const onTracksChanged = () => player && refreshTracks(player);
         const onAdaptation = () => tickStats();
@@ -245,13 +311,14 @@ export function useShakaPlayer(
         player.addEventListener('adaptation', onAdaptation);
         player.addEventListener('error', onPlayerError);
 
-        // <video> element listeners.
-        const onPlay = () => store.setPlaying(true);
-        const onPause = () => store.setPlaying(false);
-        const onTime = () => store.setCurrentTime(video.currentTime);
-        const onDuration = () => store.setDuration(video.duration);
-        const onWaiting = () => store.setBuffering(true);
-        const onPlaying = () => store.setBuffering(false);
+        // <video> element listeners — defined at effect scope so cleanup can
+        // remove them (otherwise they leak across reloads / channel switches).
+        onPlay = () => store.setPlaying(true);
+        onPause = () => store.setPlaying(false);
+        onTime = () => store.setCurrentTime(video.currentTime);
+        onDuration = () => store.setDuration(video.duration);
+        onWaiting = () => store.setBuffering(true);
+        onPlaying = () => store.setBuffering(false);
         video.addEventListener('play', onPlay);
         video.addEventListener('pause', onPause);
         video.addEventListener('timeupdate', onTime);
@@ -324,6 +391,7 @@ export function useShakaPlayer(
       cancelled = true;
       if (statsTimer) clearInterval(statsTimer);
       if (refreshTimer) clearTimeout(refreshTimer);
+      detachVideoListeners();
       store.setReady(false);
       store.setBuffering(false);
       const p = playerRef.current;
@@ -337,7 +405,7 @@ export function useShakaPlayer(
       playerRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [manifestUri, reloadKey]);
+  }, [manifestUri, reloadKey, headersKey, needsProxy, proxyReady]);
 
   /* ----------------------- Volume / mute sync --------------------------- */
   useEffect(() => {

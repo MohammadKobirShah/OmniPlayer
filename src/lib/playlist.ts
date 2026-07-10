@@ -18,6 +18,8 @@ interface ChannelSeed {
   drm?: boolean;
   isLive?: boolean;
   description: string;
+  /** Custom HTTP headers (User-Agent / Cookie) for protected VIP streams. */
+  httpHeaders?: Record<string, string>;
 }
 
 const SEEDS: ChannelSeed[] = [
@@ -87,6 +89,21 @@ const SEEDS: ChannelSeed[] = [
     drm: true,
     description: 'Widevine-protected feature. Needs a Widevine-capable browser.',
   },
+  {
+    id: 'sony-yay-vip',
+    name: 'Sony YAY! VIP (Headers)',
+    group: '🔐 Header-Protected',
+    url: 'https://bldcmprod-cdn.toffeelive.com/cdn/live/sonyyay/playlist.m3u8',
+    isLive: true,
+    description:
+      'Protected like real Toffee Live VIP. Sends a custom User-Agent + signed Cookie — parsed from #EXTVLCOPT & #EXTHTTP. Needs the proxy.',
+    httpHeaders: {
+      'User-Agent':
+        'Mozilla/5.0 (Linux; Android 14; SM-A515F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
+      Cookie:
+        'Edge-Cache-Cookie=URLPrefix=aHR0cHM6Ly9ibGRjbXByb2QtY2RuLnRvZmZlZWxpdmUuY29t:Expires=1783755096:KeyName=prod_linear:Signature=9CRcPp2OaxLI_Zj0NzUpHYh7tY8RbD1K3rzt1a4THcHFN5TK0ZeX6BCNY1gP4dgMyGQmID5zKQcSnK77Hy7rAA',
+    },
+  },
 ];
 
 function hashStr(s: string): number {
@@ -113,6 +130,7 @@ export const SAMPLE_CHANNELS: IptvChannel[] = SEEDS.map((s, i) => {
     isLive: s.isLive,
     description: s.description,
     drm: s.drm ? { servers: { 'com.widevine.alpha': WIDEVINE_NOAUTH } } : undefined,
+    httpHeaders: s.httpHeaders,
   };
   return {
     ...base,
@@ -162,6 +180,12 @@ const PROGRAM_BANK: Record<string, [string, string][]> = {
     ['Secure Screening', 'DRM-protected content for authorized devices.'],
     ['Key Exchange', 'How license servers keep premium content safe.'],
     ['After Dark', 'A protected late-night feature presentation.'],
+  ],
+  '🔐 Header-Protected': [
+    ['VIP Premiere', 'Streaming with a signed Cookie & custom User-Agent.'],
+    ['Members Only', 'Access granted via header authentication.'],
+    ['Edge Cache Hour', 'Behind the signed-URL content delivery network.'],
+    ['Late Night VIP', 'Premium programming for authenticated viewers.'],
   ],
 };
 const DEFAULT_BANK: [string, string][] = [

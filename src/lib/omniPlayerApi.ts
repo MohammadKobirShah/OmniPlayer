@@ -24,6 +24,12 @@ export interface OmniPlayerOptions {
   description?: string;
   /** Optional emoji/glyph for the logo tile. */
   glyph?: string;
+  /**
+   * Custom HTTP headers required by protected VIP streams (User-Agent, Cookie,
+   * etc.). Forbidden headers (User-Agent/Cookie) are forwarded through the
+   * proxy under `X-` prefixes — see `lib/proxy.ts` and `proxy/server.js`.
+   */
+  httpHeaders?: Record<string, string>;
 }
 
 export type OmniPlayerEvent =
@@ -96,6 +102,7 @@ function buildChannel(opts: OmniPlayerOptions): IptvChannel {
     gradient: pickGradient(id + title),
     description: opts.description,
     drm: opts.drm,
+    httpHeaders: opts.httpHeaders,
   };
 }
 
@@ -136,6 +143,9 @@ class OmniPlayerInstance implements OmniPlayerHandle {
 
   private subscribeStore() {
     this.unsubStore = usePlayerStore.subscribe((state) => {
+      // Debounce: the store fires on ~every video frame (timeupdate) and on
+      // every 1s stats tick. Only emit events when the relevant value
+      // actually changed, to avoid flooding consumer listeners.
       if (state.isReady && !this.prev.isReady) this.emit('ready');
       this.prev.isReady = state.isReady;
 
@@ -143,8 +153,8 @@ class OmniPlayerInstance implements OmniPlayerHandle {
       if (!state.isPlaying && this.prev.isPlaying) this.emit('pause');
       this.prev.isPlaying = state.isPlaying;
 
-      if (state.isFullscreen !== this.fullscreenLast) {
-        this.fullscreenLast = state.isFullscreen;
+      if (state.isFullscreen !== this.prevFullscreen) {
+        this.prevFullscreen = state.isFullscreen;
         this.emit('fullscreenchange', state.isFullscreen);
       }
 
@@ -153,11 +163,21 @@ class OmniPlayerInstance implements OmniPlayerHandle {
       }
       this.prev.error = state.error;
 
-      this.emit('timeupdate', state.currentTime);
-      this.emit('volumechange', { volume: state.volume, muted: state.isMuted });
+      if (state.currentTime !== this.prevTime) {
+        this.prevTime = state.currentTime;
+        this.emit('timeupdate', state.currentTime);
+      }
+      if (state.volume !== this.prevVolume || state.isMuted !== this.prevMuted) {
+        this.prevVolume = state.volume;
+        this.prevMuted = state.isMuted;
+        this.emit('volumechange', { volume: state.volume, muted: state.isMuted });
+      }
     });
   }
-  private fullscreenLast = false;
+  private prevFullscreen = false;
+  private prevTime = -1;
+  private prevVolume = -1;
+  private prevMuted: boolean | null = null;
 
   private video(): HTMLVideoElement | null {
     return this.el.querySelector('video');
@@ -219,6 +239,9 @@ class OmniPlayerInstance implements OmniPlayerHandle {
     const channel = buildChannel(this.options);
     usePlayerStore.getState().setPlaylist([channel]);
     usePlayerStore.getState().selectChannel(channel.id);
+    // Bump the shared nonce so the engine effect re-runs even though the
+    // manifest URL is unchanged.
+    usePlayerStore.getState().bumpReload();
   }
 
   destroy() {
@@ -290,6 +313,15 @@ export const OmniStream = {
   },
 
   /** Reference to the version (replaced at build time if desired). */
+  /**
+   * Configure the protected-stream proxy base URL (e.g.
+   * `https://my-site.com/proxy`). Required before header-protected channels
+   * (Toffee Live, Sony YAY! VIP…) can play. Mirrors `Settings → Proxy`.
+   */
+  setProxy(url: string): void {
+    usePlayerStore.getState().setProxyBase(url);
+  },
+
   version: '1.0.0',
 };
 

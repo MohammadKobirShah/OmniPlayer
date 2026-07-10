@@ -1,11 +1,17 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { usePlayerStore } from './store/playerStore';
 import { SAMPLE_CHANNELS, buildSampleEpg } from './lib/playlist';
 import { guessContainer } from './lib/m3u';
 import { detectDevice } from './lib/deviceDetect';
+import {
+  KNOWN_PLAYLISTS,
+  fetchPlaylist,
+  buildRemoteEpg,
+} from './lib/remotePlaylist';
 import OmniPlayer from './components/OmniPlayer';
 import DistributeGuide from './components/DistributeGuide';
-import { SearchIcon, StarIcon, PlayIcon } from './components/icons';
+import ProxyGuide from './components/ProxyGuide';
+import { SearchIcon, StarIcon, PlayIcon, RefreshIcon } from './components/icons';
 
 const FEATURES = ['Headless Shaka v4', 'M3U + XMLTV/EPG', 'Widevine DRM', 'Mobile Gestures', 'Chromecast'];
 
@@ -14,24 +20,54 @@ export default function App() {
   const groups = usePlayerStore((s) => s.iptvGroups);
   const favorites = usePlayerStore((s) => s.favorites);
   const setPlaylist = usePlayerStore((s) => s.setPlaylist);
+  const mergeChannels = usePlayerStore((s) => s.mergeChannels);
   const setEpg = usePlayerStore((s) => s.setEpg);
   const selectChannel = usePlayerStore((s) => s.selectChannel);
+  const setPlaylistSources = usePlayerStore((s) => s.setPlaylistSources);
+  const sourceStatus = usePlayerStore((s) => s.sourceStatus);
+  const setSourceStatus = usePlayerStore((s) => s.setSourceStatus);
 
-  const [view, setView] = useState<'library' | 'player' | 'docs'>('library');
+  const [view, setView] = useState<'library' | 'player' | 'docs' | 'proxy'>('library');
   const [query, setQuery] = useState('');
   const [group, setGroup] = useState<string>('All');
 
   const setTvMode = usePlayerStore((s) => s.setTvMode);
   const setReduceMotion = usePlayerStore((s) => s.setReduceMotion);
+  const loadedSources = useRef(false);
 
-  // Detect device profile + load the IPTV playlist / EPG once on startup.
+  /** Load all known remote playlists, merging their channels + EPG. */
+  const loadRemoteSources = useCallback(async () => {
+    for (const source of KNOWN_PLAYLISTS) {
+      setSourceStatus(source.id, { status: 'loading', count: 0 });
+      try {
+        const remote = await fetchPlaylist(source);
+        mergeChannels(remote);
+        setEpg(buildRemoteEpg(remote));
+        setSourceStatus(source.id, { status: 'loaded', count: remote.length });
+      } catch (e) {
+        setSourceStatus(source.id, {
+          status: 'error',
+          count: 0,
+        });
+        // eslint-disable-next-line no-console
+        console.warn(`[OmniStream] failed to load "${source.name}":`, e);
+      }
+    }
+  }, [mergeChannels, setEpg, setSourceStatus]);
+
+  // Detect device profile + seed the built-in playlist, then fetch remotes.
   useEffect(() => {
     const dev = detectDevice();
     setTvMode(dev.isSmartTV);
     setReduceMotion(dev.prefersReducedMotion || dev.isLowPerf);
+    setPlaylistSources(KNOWN_PLAYLISTS.map((s) => ({ id: s.id, name: s.name, protected: s.protected })));
     setPlaylist(SAMPLE_CHANNELS);
     setEpg(buildSampleEpg(SAMPLE_CHANNELS));
-  }, [setPlaylist, setEpg, setTvMode, setReduceMotion]);
+    if (!loadedSources.current) {
+      loadedSources.current = true;
+      loadRemoteSources();
+    }
+  }, [setPlaylist, setEpg, setTvMode, setReduceMotion, setPlaylistSources, loadRemoteSources]);
 
   const launch = (id: string) => {
     selectChannel(id);
@@ -58,6 +94,10 @@ export default function App() {
 
   if (view === 'docs') {
     return <DistributeGuide onBack={() => setView('library')} />;
+  }
+
+  if (view === 'proxy') {
+    return <ProxyGuide onBack={() => setView('library')} />;
   }
 
   return (
@@ -98,6 +138,12 @@ export default function App() {
           </div>
           <div className="flex flex-col items-start gap-3 sm:items-end">
             <button
+              onClick={() => setView('proxy')}
+              className="rounded-xl border border-sky-400/40 bg-sky-400/15 px-4 py-2 text-sm font-semibold text-white transition-all hover:scale-[1.03] hover:bg-sky-400/25"
+            >
+              🛡️ Proxy Setup →
+            </button>
+            <button
               onClick={() => setView('docs')}
               className="rounded-xl border border-[#e50914]/40 bg-[#e50914]/15 px-4 py-2 text-sm font-semibold text-white transition-all hover:scale-[1.03] hover:bg-[#e50914]/25"
             >
@@ -134,7 +180,50 @@ export default function App() {
                 Clear
               </button>
             )}
+            <button
+              onClick={loadRemoteSources}
+              title="Refresh live playlists"
+              className="ml-auto flex shrink-0 items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.03] px-2.5 py-1 text-[0.72rem] font-semibold text-white/60 transition-colors hover:border-white/25 hover:text-white"
+            >
+              <RefreshIcon size={14} />
+              Refresh
+            </button>
           </div>
+
+          {/* Live playlist sources status */}
+          <div className="flex flex-wrap items-center gap-2 text-[0.72rem]">
+            <span className="font-semibold uppercase tracking-wide text-white/35">Sources:</span>
+            {KNOWN_PLAYLISTS.map((s) => {
+              const st = sourceStatus[s.id];
+              const dot =
+                st?.status === 'loaded'
+                  ? 'bg-emerald-400'
+                  : st?.status === 'error'
+                    ? 'bg-red-400'
+                    : 'bg-amber-400 animate-pulse';
+              const label =
+                st?.status === 'loaded'
+                  ? `${s.name} · ${st.count}`
+                  : st?.status === 'error'
+                    ? `${s.name} · failed`
+                    : `${s.name} · loading…`;
+              return (
+                <span
+                  key={s.id}
+                  className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.03] px-2.5 py-1 text-white/60"
+                >
+                  <span className={`h-2 w-2 rounded-full ${dot}`} />
+                  {label}
+                  {s.protected && (
+                    <span className="text-sky-400/80" title="Custom HTTP headers — needs proxy">
+                      🔐
+                    </span>
+                  )}
+                </span>
+              );
+            })}
+          </div>
+
           <div className="flex flex-wrap gap-2">
             {filters.map((g) => (
               <button
@@ -161,6 +250,7 @@ export default function App() {
           <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
             {filtered.map((c) => {
               const isDrm = !!c.drm;
+              const hasHeaders = !!c.httpHeaders && Object.keys(c.httpHeaders).length > 0;
               const container = guessContainer(c.url);
               return (
                 <button
@@ -172,9 +262,22 @@ export default function App() {
                     className="relative flex aspect-video items-center justify-center overflow-hidden"
                     style={{ background: c.gradient }}
                   >
+                    {/* Glyph sits behind the logo so it shows if the image fails. */}
                     <span className="text-5xl drop-shadow-lg transition-transform duration-500 group-hover:scale-110">
                       {c.glyph}
                     </span>
+                    {c.logo && (
+                      <img
+                        src={c.logo}
+                        alt=""
+                        loading="lazy"
+                        referrerPolicy="no-referrer"
+                        className="absolute inset-0 h-full w-full object-contain p-4"
+                        onError={(e) => {
+                          (e.currentTarget as HTMLImageElement).style.display = 'none';
+                        }}
+                      />
+                    )}
                     <div className="absolute inset-0 bg-gradient-to-t from-black/65 via-transparent to-black/15" />
 
                     <div className="absolute left-2.5 top-2.5 flex gap-1.5">
@@ -190,6 +293,14 @@ export default function App() {
                       {c.isLive && (
                         <span className="flex items-center gap-1 rounded-md border border-red-400/40 bg-red-500/20 px-2 py-0.5 text-[0.6rem] font-bold tracking-wide text-red-300 backdrop-blur-sm">
                           <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-red-400" /> LIVE
+                        </span>
+                      )}
+                      {hasHeaders && (
+                        <span
+                          className="rounded-md border border-sky-400/40 bg-sky-400/15 px-2 py-0.5 text-[0.6rem] font-bold tracking-wide text-sky-300 backdrop-blur-sm"
+                          title="Sends custom HTTP headers (needs proxy)"
+                        >
+                          🔐 Headers
                         </span>
                       )}
                     </div>
@@ -225,6 +336,20 @@ export default function App() {
             })}
           </div>
         )}
+
+        {/* Protected-stream proxy note (Toffee channels) */}
+        <div className="mt-10 flex items-start gap-3 rounded-xl border border-sky-400/20 bg-sky-400/[0.06] p-4 text-[0.78rem] leading-relaxed text-sky-100/70">
+          <span className="text-base">🔐</span>
+          <div>
+            <strong className="text-sky-200">Toffee channels are header-protected.</strong> They send a
+            custom <code className="rounded bg-white/10 px-1 py-0.5 text-[0.7rem]">User-Agent</code> and
+            signed <code className="rounded bg-white/10 px-1 py-0.5 text-[0.7rem]">Cookie</code> that
+            browsers can't attach directly. To play them, set your proxy URL in{' '}
+            <strong className="text-sky-200">Settings → Proxy</strong> (or via{' '}
+            <code className="rounded bg-white/10 px-1 py-0.5 text-[0.7rem]">OmniStream.setProxy()</code>),
+            which injects those headers server-side. The built-in demo channels play without a proxy.
+          </div>
+        </div>
 
         {/* Footer note */}
         <div className="mt-10 rounded-xl border border-white/10 bg-white/[0.03] p-4 text-[0.78rem] leading-relaxed text-white/40">

@@ -214,3 +214,10 @@ export const ChevronRightIcon = (p: IconProps) => (
     <path d="M8.6 5.6a1 1 0 0 1 1.4 0l6 6a1 1 0 0 1 0 1.42l-6 6a1 1 0 0 1-1.4-1.42L14.1 12 8.6 6.7a1 1 0 0 1 0-1.4Z" />
   </Base>
 );
+
+export const RefreshIcon = (p: IconProps) => (
+  <Base {...p}>
+    <path d="M20 11a8 8 0 1 0-.9 4.6 1 1 0 1 0-1.78-.9A6 6 0 1 1 18 11h-2.2a1 1 0 0 0 0 2H19a1 1 0 0 0 1-1v-3a1 1 0 1 0-2 0v2Z" />
+    <path d="M4 13a8 8 0 0 0 14.3 4.6 1 1 0 1 0-1.7-1.06A6 6 0 0 1 6 13h2.2a1 1 0 0 0 0-2H5a1 1 0 0 0-1 1v3a1 1 0 1 0 2 0v-2Z" opacity="0" />
+  </Base>
+);
