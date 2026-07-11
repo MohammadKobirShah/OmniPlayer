@@ -1,6 +1,0 @@
-
-  OmniStream running at http://localhost:3000
-
-  Proxy endpoint:       http://localhost:3000/proxy
-  Player:               http://localhost:3000/
-
