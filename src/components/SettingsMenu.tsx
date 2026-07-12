@@ -1,81 +1,64 @@
-import { useState } from 'react';
+import React, { useState, memo } from 'react';
 import { usePlayerStore } from '../store/playerStore';
-import type { ShakaController } from '../hooks/useShakaPlayer';
-import { needsProxy, isForbiddenHeader } from '../lib/proxy';
-import { CheckIcon, CloseIcon } from './icons';
-import { formatBitrate } from '../lib/format';
+import { formatBitrate } from '../utils/formatTime';
+import { CloseIcon, CheckIcon } from './Icons';
 
-interface Props {
+type Tab = 'quality' | 'speed' | 'audio' | 'subs';
+
+const SPEED_OPTIONS = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
+
+interface SettingsMenuProps {
   open: boolean;
   onClose: () => void;
-  controller: ShakaController;
+  controller: {
+    selectQuality: (id: number | null) => void;
+    selectAudioLanguage: (lang: string) => void;
+    selectTextTrack: (id: number | null) => void;
+  };
 }
 
-type Tab = 'quality' | 'speed' | 'audio' | 'subs' | 'proxy';
-
-const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2];
-
-export default function SettingsMenu({ open, onClose, controller }: Props) {
+export const SettingsMenu: React.FC<SettingsMenuProps> = memo(({ open, onClose, controller }) => {
   const [tab, setTab] = useState<Tab>('quality');
-  const {
-    qualities,
-    audioTracks,
-    textTracks,
-    abrEnabled,
-    currentQualityId,
-    currentAudioLanguage,
-    currentTextId,
-    playbackRate,
-  } = usePlayerStore();
-  const proxyBase = usePlayerStore((s) => s.proxyBase);
-  const setProxyBase = usePlayerStore((s) => s.setProxyBase);
-  const channels = usePlayerStore((s) => s.iptvChannels);
-  const activeChannelId = usePlayerStore((s) => s.activeChannelId);
-  const activeChannel = channels.find((c) => c.id === activeChannelId);
-  const headers = activeChannel?.httpHeaders;
-  const [proxyInput, setProxyInput] = useState(proxyBase);
+  const qualities = usePlayerStore((s) => s.qualities);
+  const currentQualityId = usePlayerStore((s) => s.currentQualityId);
+  const abrEnabled = usePlayerStore((s) => s.abrEnabled);
+  const playbackRate = usePlayerStore((s) => s.playbackRate);
+  const audioTracks = usePlayerStore((s) => s.audioTracks);
+  const currentAudioLanguage = usePlayerStore((s) => s.currentAudioLanguage);
+  const textTracks = usePlayerStore((s) => s.textTracks);
+  const currentTextTrackId = usePlayerStore((s) => s.currentTextTrackId);
 
   if (!open) return null;
 
-  const tabs: { id: Tab; label: string }[] = [
-    { id: 'quality', label: 'Quality' },
-    { id: 'speed', label: 'Speed' },
-    { id: 'audio', label: 'Audio' },
-    { id: 'subs', label: 'Subtitles' },
-    { id: 'proxy', label: 'Proxy' },
+  const tabs: { key: Tab; label: string }[] = [
+    { key: 'quality', label: 'Quality' },
+    { key: 'speed', label: 'Speed' },
+    { key: 'audio', label: 'Audio' },
+    { key: 'subs', label: 'Subs' },
   ];
 
-  const Row = ({
-    active,
-    onClick,
-    children,
-  }: {
+  const MenuRow: React.FC<{
     active: boolean;
     onClick: () => void;
     children: React.ReactNode;
-  }) => (
+  }> = ({ active, onClick, children }) => (
     <button
       className={`omni-menu-row ${active ? 'is-active' : ''}`}
-      onClick={() => {
-        onClick();
-        if (tab === 'quality' || tab === 'speed') {
-          /* keep menu open while adjusting */
-        }
-      }}
+      onClick={onClick}
     >
       <span className="omni-menu-row-label">{children}</span>
-      {active && <CheckIcon size={18} className="omni-menu-check" />}
+      {active && <CheckIcon size={16} className="omni-menu-check" />}
     </button>
   );
 
   return (
-    <div className="omni-menu omni-glass" role="menu" onClick={(e) => e.stopPropagation()}>
+    <div className="omni-menu omni-glass" onClick={(e) => e.stopPropagation()}>
       <div className="omni-menu-tabs">
         {tabs.map((t) => (
           <button
-            key={t.id}
-            className={`omni-menu-tab ${tab === t.id ? 'is-active' : ''}`}
-            onClick={() => setTab(t.id)}
+            key={t.key}
+            className={`omni-menu-tab ${tab === t.key ? 'is-active' : ''}`}
+            onClick={() => setTab(t.key)}
           >
             {t.label}
           </button>
@@ -85,34 +68,38 @@ export default function SettingsMenu({ open, onClose, controller }: Props) {
       <div className="omni-menu-body">
         {tab === 'quality' && (
           <>
-            <Row
+            <MenuRow
               active={abrEnabled || currentQualityId === null}
               onClick={() => controller.selectQuality(null)}
             >
-              <span className="omni-qual-name">Auto</span>
-              <span className="omni-qual-sub">Adaptive bitrate (recommended)</span>
-            </Row>
+              Auto
+            </MenuRow>
             {qualities.length === 0 && (
-              <div className="omni-menu-empty">Resolutions appear once playback starts…</div>
+              <div className="omni-menu-empty">
+                Qualities appear once playback starts…
+              </div>
             )}
             {qualities.map((q) => (
-              <Row
+              <MenuRow
                 key={q.id}
                 active={!abrEnabled && currentQualityId === q.id}
                 onClick={() => controller.selectQuality(q.id)}
               >
-                <span className="omni-qual-name">{q.label}</span>
-                <span className="omni-qual-sub">{formatBitrate(q.bandwidth / 1000)}</span>
-              </Row>
+                {q.label} <span className="omni-qual-bw">{formatBitrate(q.bandwidth / 1000)}</span>
+              </MenuRow>
             ))}
           </>
         )}
 
         {tab === 'speed' &&
-          SPEEDS.map((s) => (
-            <Row key={s} active={playbackRate === s} onClick={() => usePlayerStore.getState().setPlaybackRate(s)}>
+          SPEED_OPTIONS.map((s) => (
+            <MenuRow
+              key={s}
+              active={playbackRate === s}
+              onClick={() => usePlayerStore.getState().setPlaybackRate(s)}
+            >
               {s === 1 ? 'Normal' : `${s}×`}
-            </Row>
+            </MenuRow>
           ))}
 
         {tab === 'audio' && (
@@ -120,88 +107,39 @@ export default function SettingsMenu({ open, onClose, controller }: Props) {
             {audioTracks.length === 0 && (
               <div className="omni-menu-empty">Single audio track.</div>
             )}
-            {audioTracks.map((a) => (
-              <Row
-                key={a.id}
-                active={currentAudioLanguage === a.language}
-                onClick={() => controller.selectAudioLanguage(a.language)}
+            {audioTracks.map((t) => (
+              <MenuRow
+                key={t.id}
+                active={currentAudioLanguage === t.language}
+                onClick={() => controller.selectAudioLanguage(t.language)}
               >
-                {a.label}
-              </Row>
+                {t.label}
+              </MenuRow>
             ))}
           </>
         )}
 
         {tab === 'subs' && (
           <>
-            <Row active={currentTextId === null} onClick={() => controller.selectTextTrack(null)}>
+            <MenuRow
+              active={currentTextTrackId === null}
+              onClick={() => controller.selectTextTrack(null)}
+            >
               Off
-            </Row>
+            </MenuRow>
             {textTracks.length === 0 && (
               <div className="omni-menu-empty">No subtitles for this stream.</div>
             )}
             {textTracks.map((t) => (
-              <Row
+              <MenuRow
                 key={t.id}
-                active={currentTextId === t.id}
+                active={currentTextTrackId === t.id}
                 onClick={() => controller.selectTextTrack(t.id)}
               >
                 {t.label}
-              </Row>
+              </MenuRow>
             ))}
           </>
-        )}
-
-        {tab === 'proxy' && (
-          <div className="omni-proxy-panel">
-            <div className="omni-proxy-status">
-              {headers && Object.keys(headers).length > 0 ? (
-                <>
-                  <span className={`omni-proxy-dot ${needsProxy(headers) ? 'is-warn' : 'is-ok'}`} />
-                  <span>
-                    {needsProxy(headers) ? 'Protected stream — proxy required' : 'Custom headers (direct)'}
-                  </span>
-                </>
-              ) : (
-                <>
-                  <span className="omni-proxy-dot is-ok" />
-                  <span>No custom headers on this channel.</span>
-                </>
-              )}
-            </div>
-
-            {headers && (
-              <ul className="omni-proxy-headers">
-                {Object.entries(headers).map(([k, v]) => (
-                  <li key={k}>
-                    <span className="omni-proxy-key">{k}</span>
-                    <span className="omni-proxy-val">{isForbiddenHeader(k) ? '⚠ forbidden → proxied' : v.slice(0, 32)}</span>
-                  </li>
-                ))}
-              </ul>
-            )}
-
-            <label className="omni-proxy-label">Proxy base URL</label>
-            <div className="omni-proxy-input-row">
-              <input
-                className="omni-proxy-input"
-                value={proxyInput}
-                onChange={(e) => setProxyInput(e.target.value)}
-                placeholder="https://your-site.com/proxy"
-                spellCheck={false}
-              />
-              <button
-                className="omni-proxy-save"
-                onClick={() => setProxyBase(proxyInput)}
-              >
-                Save
-              </button>
-            </div>
-            <p className="omni-proxy-note">
-              Browsers can't send <code>User-Agent</code>/<code>Cookie</code> directly. Route through a
-              proxy (see <code>proxy/server.js</code>) which converts the <code>X-</code> headers back.
-            </p>
-          </div>
         )}
       </div>
 
@@ -210,4 +148,4 @@ export default function SettingsMenu({ open, onClose, controller }: Props) {
       </button>
     </div>
   );
-}
+});

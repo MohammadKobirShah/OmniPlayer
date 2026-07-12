@@ -1,32 +1,26 @@
 import { create } from 'zustand';
-import type { IptvChannel } from '../lib/m3u';
-import type { EpgMap } from '../lib/xmltv';
-import { setProxyBase as configureProxyBase } from '../lib/proxy';
 
-/* ------------------------------------------------------------------ */
-/*  Types                                                              */
-/* ------------------------------------------------------------------ */
-
-export type GestureHint =
-  | { kind: 'seek'; value: number; forward?: boolean }
-  | { kind: 'volume'; value: number }
-  | { kind: 'brightness'; value: number }
-  | { kind: 'speed'; value: number };
-
-export interface QualityOption {
+export interface QualityLevel {
   id: number;
-  height: number;
-  bandwidth: number;
   label: string;
+  height: number;
+  width: number;
+  bandwidth: number;
+  frameRate?: number;
+  videoCodec?: string;
+  audioCodec?: string;
+  channelsCount?: number;
+  audioSampleRate?: number;
+  active?: boolean;
 }
 
-export interface AudioOption {
+export interface AudioTrack {
   id: number;
   language: string;
   label: string;
 }
 
-export interface TextOption {
+export interface TextTrack {
   id: number;
   language: string;
   label: string;
@@ -35,319 +29,316 @@ export interface TextOption {
 export interface PlayerStats {
   width: number;
   height: number;
-  /** Stream bandwidth in kbps (current rendition). */
   bitrate: number;
-  /** Estimated network bandwidth in kbps. */
   estimatedBandwidth: number;
-  /** Seconds of video buffered ahead of the playhead. */
   bufferedAhead: number;
-  droppedFrames: number;
   decodedFrames: number;
+  droppedFrames: number;
   completionPercent: number;
-  playTime: number;
 }
 
-export type ErrorSeverity = 'critical' | 'fatal' | 'recoverable';
+export interface ClearKeyPair {
+  kid: string;
+  key: string;
+}
+
+export interface DRMConfig {
+  type: 'widevine' | 'playready' | 'clearkey' | 'none';
+  servers?: Record<string, string>;
+  clearKeys?: ClearKeyPair[];
+}
+
+export interface IPTVChannel {
+  id: string;
+  name: string;
+  url: string;
+  group: string;
+  logo?: string;
+  glyph: string;
+  headers?: Record<string, string>;
+  gradient: string;
+  number?: number;
+  isLive: boolean;
+  drm?: DRMConfig;
+}
+
+export interface EPGEntry {
+  start: number;
+  stop: number;
+  title: string;
+  desc?: string;
+}
+
+export interface GestureHint {
+  type: 'seek' | 'volume' | 'brightness' | 'speed';
+  value: string;
+  secondary?: string;
+}
 
 export interface PlayerError {
   code: number | string;
-  category?: number;
   message: string;
   hint?: string;
-  severity: ErrorSeverity;
 }
 
-export interface PlayerState {
-  /* Core playback state */
+// ─── HOT PATH: mutable refs updated at 60fps, NO zustand set() ───
+// These values change every frame / every timeupdate.
+// Reading them via zustand selectors would cause 15-25 re-renders/sec.
+// Instead we store them mutably and only push to zustand at ~4 fps for UI.
+export const hotState = {
+  currentTime: 0,
+  duration: 0,
+  bufferedFraction: 0,
+  stats: {
+    width: 0,
+    height: 0,
+    bitrate: 0,
+    estimatedBandwidth: 0,
+    bufferedAhead: 0,
+    decodedFrames: 0,
+    droppedFrames: 0,
+    completionPercent: 0,
+  } as PlayerStats,
+};
+
+interface PlayerState {
+  // Playback state (low-frequency — only updates on play/pause/ready/error)
   isPlaying: boolean;
   isReady: boolean;
   isBuffering: boolean;
-  currentTime: number;
-  duration: number;
   volume: number;
   isMuted: boolean;
-  isFullscreen: boolean;
-  showControls: boolean;
   playbackRate: number;
+  brightness: number;
+
+  // UI-visible time (pushed from hotState at ~4fps by a rAF loop)
+  displayTime: number;
+  displayDuration: number;
+  displayBuffered: number;
+
+  // UI state
+  showControls: boolean;
+  isFullscreen: boolean;
+  isDrawerOpen: boolean;
+  error: PlayerError | null;
+  gestureHint: GestureHint | null;
+  drawerQuery: string;
+
+  // Quality & tracks
+  qualities: QualityLevel[];
+  currentQualityId: number | null;
+  abrEnabled: boolean;
+  audioTracks: AudioTrack[];
+  currentAudioLanguage: string | null;
+  textTracks: TextTrack[];
+  currentTextTrackId: number | null;
   captionsEnabled: boolean;
 
-  /* Track metadata */
-  qualities: QualityOption[];
-  audioTracks: AudioOption[];
-  textTracks: TextOption[];
-  abrEnabled: boolean;
-  currentQualityId: number | null;
-  currentAudioLanguage: string | null;
-  currentTextId: number | null;
-
-  /* Telemetry */
+  // Stats (pushed at ~1fps)
   stats: PlayerStats;
 
-  /* Errors */
-  error: PlayerError | null;
-
-  /* Actions */
-  setPlaying: (isPlaying: boolean) => void;
-  setCurrentTime: (currentTime: number) => void;
-  setDuration: (duration: number) => void;
-  setBuffering: (isBuffering: boolean) => void;
-  setReady: (isReady: boolean) => void;
-  setVolume: (volume: number) => void;
-  setMuted: (isMuted: boolean) => void;
-  toggleMute: () => void;
-  setFullscreen: (isFullscreen: boolean) => void;
-  setShowControls: (show: boolean) => void;
-  toggleControls: (show?: boolean) => void;
-  setPlaybackRate: (rate: number) => void;
-  setCaptions: (enabled: boolean) => void;
-
-  setQualities: (q: QualityOption[]) => void;
-  setAudioTracks: (a: AudioOption[]) => void;
-  setTextTracks: (t: TextOption[]) => void;
-  setAbrEnabled: (enabled: boolean) => void;
-  setCurrentQualityId: (id: number | null) => void;
-  setCurrentAudioLanguage: (lang: string | null) => void;
-  setCurrentTextId: (id: number | null) => void;
-
-  setStats: (stats: Partial<PlayerStats>) => void;
-  setError: (error: PlayerError | null) => void;
-
-  /* ----------------------------- IPTV / EPG ----------------------------- */
-  iptvChannels: IptvChannel[];
+  // IPTV
+  iptvChannels: IPTVChannel[];
   iptvGroups: string[];
-  epg: EpgMap;
   activeChannelId: string | null;
-  isDrawerOpen: boolean;
-  drawerQuery: string;
   favorites: string[];
+  epg: Record<string, EPGEntry[]>;
 
-  setPlaylist: (channels: IptvChannel[]) => void;
-  mergeChannels: (channels: IptvChannel[]) => void;
-  setEpg: (epg: EpgMap) => void;
-  selectChannel: (id: string) => void;
-  clearChannel: () => void;
-  toggleDrawer: (open?: boolean) => void;
-  setDrawerQuery: (q: string) => void;
-  toggleFavorite: (id: string) => void;
-
-  /* ------------------------------ Gestures ------------------------------ */
-  brightness: number;
-  gestureHint: GestureHint | null;
-  setBrightness: (b: number) => void;
-  setGestureHint: (h: GestureHint | null) => void;
-
-  /* --------------------------- Device profile --------------------------- */
+  // Settings
   tvMode: boolean;
   reduceMotion: boolean;
+
+  // Actions
+  setIsPlaying: (v: boolean) => void;
+  setIsReady: (v: boolean) => void;
+  setIsBuffering: (v: boolean) => void;
+  setVolume: (v: number) => void;
+  toggleMute: () => void;
+  setPlaybackRate: (v: number) => void;
+  setBrightness: (v: number) => void;
+  setShowControls: (v: boolean) => void;
+  setFullscreen: (v: boolean) => void;
+  toggleDrawer: (v?: boolean) => void;
+  setError: (e: PlayerError | null) => void;
+  setGestureHint: (h: GestureHint | null) => void;
+  setDrawerQuery: (q: string) => void;
+  setQualities: (q: QualityLevel[]) => void;
+  selectQuality: (id: number | null) => void;
+  setAbrEnabled: (v: boolean) => void;
+  setAudioTracks: (t: AudioTrack[]) => void;
+  selectAudioLanguage: (lang: string) => void;
+  setTextTracks: (t: TextTrack[]) => void;
+  selectTextTrack: (id: number | null) => void;
+  setCaptionsEnabled: (v: boolean) => void;
+  pushTimeToUI: () => void;
+  pushStatsToUI: () => void;
+  setChannels: (channels: IPTVChannel[]) => void;
+  mergeChannels: (channels: IPTVChannel[]) => void;
+  selectChannel: (id: string) => void;
+  toggleFavorite: (id: string) => void;
   setTvMode: (v: boolean) => void;
   setReduceMotion: (v: boolean) => void;
-
-  /* ------------------------ Protected-stream proxy --------------------- */
-  proxyBase: string;
-  setProxyBase: (url: string) => void;
-
-  /* ------------------------ Reload nonce (shared) ---------------------- */
-  /** Bumped to force a same-URL reload (Retry button / API reload()). */
-  reloadNonce: number;
-  bumpReload: () => void;
-
-  /* ------------------------- Remote sources ---------------------------- */
-  /** id → human label for each known playlist source. */
-  playlistSources: { id: string; name: string; protected: boolean }[];
-  /** id → load status for each source (for UI feedback). */
-  sourceStatus: Record<string, { status: 'loading' | 'loaded' | 'error'; count: number }>;
-  setPlaylistSources: (s: { id: string; name: string; protected: boolean }[]) => void;
-  setSourceStatus: (id: string, status: { status: 'loading' | 'loaded' | 'error'; count: number }) => void;
-
-  resetPlayback: () => void;
+  reset: () => void;
 }
 
-const EMPTY_STATS: PlayerStats = {
+const defaultStats: PlayerStats = {
   width: 0,
   height: 0,
   bitrate: 0,
   estimatedBandwidth: 0,
   bufferedAhead: 0,
-  droppedFrames: 0,
   decodedFrames: 0,
+  droppedFrames: 0,
   completionPercent: 0,
-  playTime: 0,
 };
 
-export const usePlayerStore = create<PlayerState>((set) => ({
+// Debounced localStorage write — max once per 2 seconds
+let _volSaveTimer: ReturnType<typeof setTimeout> | null = null;
+function debouncedSaveVolume(v: number) {
+  if (_volSaveTimer) clearTimeout(_volSaveTimer);
+  _volSaveTimer = setTimeout(() => localStorage.setItem('omni-volume', String(v)), 2000);
+}
+
+export const usePlayerStore = create<PlayerState>((set, get) => ({
   isPlaying: false,
   isReady: false,
   isBuffering: false,
-  currentTime: 0,
-  duration: 0,
-  volume: 1,
+  volume: parseFloat(localStorage.getItem('omni-volume') || '0.8'),
   isMuted: false,
-  isFullscreen: false,
-  showControls: true,
   playbackRate: 1,
-  captionsEnabled: false,
+  brightness: 1,
+
+  displayTime: 0,
+  displayDuration: 0,
+  displayBuffered: 0,
+
+  showControls: true,
+  isFullscreen: false,
+  isDrawerOpen: false,
+  error: null,
+  gestureHint: null,
+  drawerQuery: '',
 
   qualities: [],
-  audioTracks: [],
-  textTracks: [],
-  abrEnabled: true,
   currentQualityId: null,
+  abrEnabled: true,
+  audioTracks: [],
   currentAudioLanguage: null,
-  currentTextId: null,
+  textTracks: [],
+  currentTextTrackId: null,
+  captionsEnabled: false,
 
-  stats: EMPTY_STATS,
-  error: null,
+  stats: { ...defaultStats },
 
   iptvChannels: [],
   iptvGroups: [],
-  epg: {},
   activeChannelId: null,
-  isDrawerOpen: false,
-  drawerQuery: '',
-  favorites: [],
-
-  brightness: 1,
-  gestureHint: null,
+  favorites: JSON.parse(localStorage.getItem('omni-favorites') || '[]'),
+  epg: {},
 
   tvMode: false,
   reduceMotion: false,
 
-  proxyBase: '',
-
-  reloadNonce: 0,
-
-  playlistSources: [],
-  sourceStatus: {},
-
-  setPlaying: (isPlaying) => set({ isPlaying }),
-  setCurrentTime: (currentTime) => set({ currentTime }),
-  setDuration: (duration) => set({ duration }),
-  setBuffering: (isBuffering) => set({ isBuffering }),
-  setReady: (isReady) => set({ isReady }),
-  setVolume: (volume) =>
-    set({ volume: Math.min(1, Math.max(0, volume)), isMuted: volume <= 0 }),
-  setMuted: (isMuted) => set({ isMuted }),
-  toggleMute: () => set((state) => ({ isMuted: !state.isMuted })),
-  setFullscreen: (isFullscreen) => set({ isFullscreen }),
-  setShowControls: (show) => set({ showControls: show }),
-  toggleControls: (show) =>
-    set((state) => ({
-      showControls: show !== undefined ? show : !state.showControls,
-    })),
-  setPlaybackRate: (rate) => set({ playbackRate: rate }),
-  setCaptions: (captionsEnabled) => set({ captionsEnabled }),
-
-  setQualities: (qualities) => set({ qualities }),
-  setAudioTracks: (audioTracks) => set({ audioTracks }),
-  setTextTracks: (textTracks) => set({ textTracks }),
-  setAbrEnabled: (abrEnabled) => set({ abrEnabled }),
-  setCurrentQualityId: (currentQualityId) => set({ currentQualityId }),
-  setCurrentAudioLanguage: (currentAudioLanguage) => set({ currentAudioLanguage }),
-  setCurrentTextId: (currentTextId) => set({ currentTextId }),
-
-  setStats: (stats) => set((state) => ({ stats: { ...state.stats, ...stats } })),
-  setError: (error) => set({ error }),
-
-  setPlaylist: (channels) =>
-    set(() => {
-      const seen = new Set<string>();
-      const groups: string[] = [];
-      for (const c of channels) {
-        if (!seen.has(c.group)) {
-          seen.add(c.group);
-          groups.push(c.group);
-        }
-      }
-      return { iptvChannels: channels, iptvGroups: groups };
-    }),
-  mergeChannels: (channels) =>
-    set((state) => {
-      const byId = new Map(state.iptvChannels.map((c) => [c.id, c]));
-      let nextNumber = Math.max(0, ...state.iptvChannels.map((c) => c.number));
-      for (const c of channels) {
-        const existing = byId.get(c.id);
-        if (existing) byId.set(c.id, { ...existing, ...c });
-        else {
-          nextNumber += 1;
-          byId.set(c.id, { ...c, number: c.number || nextNumber });
-        }
-      }
-      const merged = [...byId.values()];
-      const seen = new Set<string>();
-      const groups: string[] = [];
-      for (const c of merged) {
-        if (!seen.has(c.group)) {
-          seen.add(c.group);
-          groups.push(c.group);
-        }
-      }
-      return { iptvChannels: merged, iptvGroups: groups };
-    }),
-  setEpg: (epg) => set({ epg }),
-  selectChannel: (id) =>
-    set(() => ({
-      activeChannelId: id,
-      isDrawerOpen: false,
-      showControls: true,
-      isPlaying: false,
-      isReady: false,
-      isBuffering: false,
-      currentTime: 0,
-      duration: 0,
-      error: null,
-      qualities: [],
-      audioTracks: [],
-      textTracks: [],
-      abrEnabled: true,
-      currentQualityId: null,
-      currentAudioLanguage: null,
-      currentTextId: null,
-      captionsEnabled: false,
-      stats: EMPTY_STATS,
-    })),
-  clearChannel: () => set({ activeChannelId: null }),
-  toggleDrawer: (open) =>
-    set((state) => ({ isDrawerOpen: open !== undefined ? open : !state.isDrawerOpen })),
-  setDrawerQuery: (q) => set({ drawerQuery: q }),
-  toggleFavorite: (id) =>
-    set((state) => ({
-      favorites: state.favorites.includes(id)
-        ? state.favorites.filter((f) => f !== id)
-        : [...state.favorites, id],
-    })),
-  setBrightness: (b) => set({ brightness: Math.min(1.8, Math.max(0.25, b)) }),
+  setIsPlaying: (v) => set({ isPlaying: v }),
+  setIsReady: (v) => set({ isReady: v }),
+  setIsBuffering: (v) => set({ isBuffering: v }),
+  setVolume: (v) => {
+    const clamped = Math.max(0, Math.min(1, v));
+    set({ volume: clamped });
+    debouncedSaveVolume(clamped);
+  },
+  toggleMute: () => set((s) => ({ isMuted: !s.isMuted })),
+  setPlaybackRate: (v) => set({ playbackRate: v }),
+  setBrightness: (v) => set({ brightness: Math.max(0.2, Math.min(1.5, v)) }),
+  setShowControls: (v) => set({ showControls: v }),
+  setFullscreen: (v) => set({ isFullscreen: v }),
+  toggleDrawer: (v) => set((s) => ({ isDrawerOpen: v ?? !s.isDrawerOpen })),
+  setError: (e) => set({ error: e }),
   setGestureHint: (h) => set({ gestureHint: h }),
+  setDrawerQuery: (q) => set({ drawerQuery: q }),
+  setQualities: (q) => set({ qualities: q }),
+  selectQuality: (id) => set({ currentQualityId: id, abrEnabled: id === null }),
+  setAbrEnabled: (v) => set({ abrEnabled: v }),
+  setAudioTracks: (t) => set({ audioTracks: t }),
+  selectAudioLanguage: (lang) => set({ currentAudioLanguage: lang }),
+  setTextTracks: (t) => set({ textTracks: t }),
+  selectTextTrack: (id) => set({ currentTextTrackId: id, captionsEnabled: id !== null }),
+  setCaptionsEnabled: (v) => set({ captionsEnabled: v }),
 
-  setTvMode: (tvMode) => set({ tvMode }),
-  setReduceMotion: (reduceMotion) => set({ reduceMotion }),
-
-  setProxyBase: (url) => {
-    configureProxyBase(url);
-    set({ proxyBase: url.replace(/\/+$/, '') });
+  // Batch-push hot-path values to UI at controlled rate
+  pushTimeToUI: () => {
+    const prev = get();
+    const t = hotState.currentTime;
+    const d = hotState.duration;
+    const b = hotState.bufferedFraction;
+    // Always push if duration changed (initial load) or time moved meaningfully
+    const dChanged = prev.displayDuration !== d;
+    const tChanged = Math.abs(prev.displayTime - t) > 0.15;
+    const bChanged = Math.abs(prev.displayBuffered - b) > 0.003;
+    if (tChanged || dChanged || bChanged) {
+      set({ displayTime: t, displayDuration: d, displayBuffered: b });
+    }
   },
 
-  bumpReload: () => set((state) => ({ reloadNonce: state.reloadNonce + 1 })),
+  // Push stats at ~1fps
+  pushStatsToUI: () => {
+    set({ stats: { ...hotState.stats } });
+  },
 
-  setPlaylistSources: (sources) => set({ playlistSources: sources }),
-  setSourceStatus: (id, status) =>
-    set((state) => ({ sourceStatus: { ...state.sourceStatus, [id]: status } })),
-
-  resetPlayback: () =>
+  setChannels: (channels) => {
+    const groups = [...new Set(channels.map((c) => c.group))].sort();
+    set({ iptvChannels: channels, iptvGroups: groups });
+  },
+  mergeChannels: (newChannels) => {
+    const existing = get().iptvChannels;
+    const existingIds = new Set(existing.map((c) => c.id));
+    const merged = [...existing, ...newChannels.filter((c) => !existingIds.has(c.id))];
+    const groups = [...new Set(merged.map((c) => c.group))].sort();
+    set({ iptvChannels: merged, iptvGroups: groups });
+  },
+  selectChannel: (id) => {
+    hotState.currentTime = 0;
+    hotState.duration = 0;
+    hotState.bufferedFraction = 0;
+    hotState.stats = { ...defaultStats };
+    set({
+      activeChannelId: id,
+      isReady: false,
+      isPlaying: false,
+      isBuffering: true,
+      error: null,
+      displayTime: 0,
+      displayDuration: 0,
+      displayBuffered: 0,
+      qualities: [],
+      currentQualityId: null,
+      abrEnabled: true,
+      stats: { ...defaultStats },
+    });
+  },
+  toggleFavorite: (id) => {
+    const favs = get().favorites;
+    const next = favs.includes(id) ? favs.filter((f) => f !== id) : [...favs, id];
+    localStorage.setItem('omni-favorites', JSON.stringify(next));
+    set({ favorites: next });
+  },
+  setTvMode: (v) => set({ tvMode: v }),
+  setReduceMotion: (v) => set({ reduceMotion: v }),
+  reset: () => {
+    hotState.currentTime = 0;
+    hotState.duration = 0;
+    hotState.bufferedFraction = 0;
+    hotState.stats = { ...defaultStats };
     set({
       isPlaying: false,
       isReady: false,
       isBuffering: false,
-      currentTime: 0,
-      duration: 0,
+      displayTime: 0,
+      displayDuration: 0,
+      displayBuffered: 0,
       error: null,
       qualities: [],
-      audioTracks: [],
-      textTracks: [],
-      abrEnabled: true,
-      currentQualityId: null,
-      currentAudioLanguage: null,
-      currentTextId: null,
-      captionsEnabled: false,
-      stats: EMPTY_STATS,
-    }),
+      stats: { ...defaultStats },
+    });
+  },
 }));

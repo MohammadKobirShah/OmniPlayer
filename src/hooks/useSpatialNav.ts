@@ -1,139 +1,313 @@
-import { useEffect } from 'react';
+import { useEffect, useCallback } from 'react';
+import { usePlayerStore } from '../store/playerStore';
 
-type Dir = 'left' | 'right' | 'up' | 'down';
+/**
+ * Focusable selector — all interactive elements in the player/library.
+ */
+const FOCUSABLE = [
+  'button:not([disabled]):not([aria-hidden="true"])',
+  'a[href]',
+  'input:not([disabled])',
+  'select:not([disabled])',
+  'textarea:not([disabled])',
+  '[tabindex]:not([tabindex="-1"])',
+].join(', ');
 
-const VECTORS: Record<Dir, { x: number; y: number }> = {
-  left: { x: -1, y: 0 },
-  right: { x: 1, y: 0 },
-  up: { x: 0, y: -1 },
-  down: { x: 0, y: 1 },
-};
+interface Rect {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+  cx: number;
+  cy: number;
+  el: HTMLElement;
+}
 
-function center(el: HTMLElement) {
+function getRect(el: HTMLElement): Rect {
   const r = el.getBoundingClientRect();
-  return { x: r.left + r.width / 2, y: r.top + r.height / 2, w: r.width, h: r.height };
+  return {
+    left: r.left,
+    top: r.top,
+    right: r.right,
+    bottom: r.bottom,
+    cx: r.left + r.width / 2,
+    cy: r.top + r.height / 2,
+    el,
+  };
 }
 
-function isVisible(el: Element): el is HTMLElement {
-  if (!(el instanceof HTMLElement)) return false;
-  if ((el as HTMLButtonElement).disabled) return false;
+function isVisible(el: HTMLElement): boolean {
+  if (!el.offsetParent && el.style.position !== 'fixed') return false;
+  const style = getComputedStyle(el);
+  if (style.visibility === 'hidden' || style.display === 'none' || style.opacity === '0') return false;
   const r = el.getBoundingClientRect();
-  // Off-DOM or zero-size elements are not navigable.
-  if (r.width < 2 || r.height < 2) return false;
-  if (el.offsetParent === null && getComputedStyle(el).position !== 'fixed') return false;
-  return true;
-}
-
-/** Determine which region currently owns focus (drawer / menu / controls). */
-function getScope(container: HTMLElement): HTMLElement | null {
-  const drawer = container.querySelector<HTMLElement>('.omni-drawer.is-open');
-  if (drawer) return drawer;
-  for (const sel of ['.omni-menu', '.omni-stats', '.omni-help']) {
-    const el = container.querySelector<HTMLElement>(sel);
-    if (el) return el;
-  }
-  return container.querySelector<HTMLElement>('.omni-controls-wrapper') ?? container;
-}
-
-function gatherFocusables(scope: HTMLElement): HTMLElement[] {
-  const nodes = scope.querySelectorAll<HTMLElement>(
-    'button, [data-focusable], input[type="range"], input, [tabindex]:not([tabindex="-1"])',
-  );
-  return Array.from(nodes).filter(isVisible);
-}
-
-/** Move focus to the geometrically-nearest element in the given direction. */
-function move(dir: Dir, scope: HTMLElement): boolean {
-  const items = gatherFocusables(scope);
-  if (items.length === 0) return false;
-
-  const active = document.activeElement;
-  // If nothing in scope is focused, seed to the first item.
-  let currentIdx = active instanceof HTMLElement ? items.indexOf(active) : -1;
-  if (currentIdx === -1) {
-    items[0].focus({ preventScroll: false });
-    items[0].scrollIntoView({ block: 'nearest', inline: 'nearest' });
-    return true;
-  }
-
-  const here = center(items[currentIdx]);
-  const vec = VECTORS[dir];
-  let bestIdx = -1;
-  let bestScore = Infinity;
-
-  for (let i = 0; i < items.length; i++) {
-    if (i === currentIdx) continue;
-    const there = center(items[i]);
-    const dx = there.x - here.x;
-    const dy = there.y - here.y;
-    // Project onto the direction axis.
-    const primary = dx * vec.x + dy * vec.y;
-    if (primary <= 1) continue; // behind or same spot
-    // Perpendicular offset (absolute).
-    const perp = Math.abs(dx * (-vec.y) + dy * vec.x);
-    // Prefer close + well-aligned; alignment matters more than raw distance.
-    const score = perp * 1.4 + primary;
-    if (score < bestScore) {
-      bestScore = score;
-      bestIdx = i;
-    }
-  }
-
-  if (bestIdx === -1) return false;
-  const target = items[bestIdx];
-  target.focus({ preventScroll: true });
-  target.scrollIntoView({ block: 'nearest', inline: 'nearest' });
-  return true;
+  return r.width > 0 && r.height > 0;
 }
 
 /**
- * D-pad / arrow-key spatial navigation for 10-foot TV UIs. Replaces the
- * pointer model: arrows move focus between the geometrically nearest control
- * in the active scope; Enter activates it.
- *
- * The arrow/Enter keys are *consumed* here (stopImmediatePropagation) so the
- * desktop seek/volume shortcuts can be gated off in TV mode by the caller.
+ * Find best candidate in a given direction from the current focused element.
+ * Uses a weighted scoring: primary axis distance + perpendicular axis penalty.
+ */
+function findNextFocus(
+  current: Rect,
+  candidates: Rect[],
+  direction: 'up' | 'down' | 'left' | 'right'
+): HTMLElement | null {
+  let best: Rect | null = null;
+  let bestScore = Infinity;
+
+  for (const c of candidates) {
+    if (c.el === current.el) continue;
+
+    let primaryDist: number;
+    let crossDist: number;
+    let isInDirection: boolean;
+
+    switch (direction) {
+      case 'up':
+        isInDirection = c.cy < current.cy - 2;
+        primaryDist = current.top - c.bottom;
+        crossDist = Math.abs(c.cx - current.cx);
+        break;
+      case 'down':
+        isInDirection = c.cy > current.cy + 2;
+        primaryDist = c.top - current.bottom;
+        crossDist = Math.abs(c.cx - current.cx);
+        break;
+      case 'left':
+        isInDirection = c.cx < current.cx - 2;
+        primaryDist = current.left - c.right;
+        crossDist = Math.abs(c.cy - current.cy);
+        break;
+      case 'right':
+        isInDirection = c.cx > current.cx + 2;
+        primaryDist = c.left - current.right;
+        crossDist = Math.abs(c.cy - current.cy);
+        break;
+    }
+
+    if (!isInDirection) continue;
+    if (primaryDist < -5) continue; // behind us
+
+    // Score: primary axis weight 1x, cross axis weight 3x (penalize off-axis heavily)
+    const score = Math.max(0, primaryDist) + crossDist * 3;
+
+    if (score < bestScore) {
+      bestScore = score;
+      best = c;
+    }
+  }
+
+  return best?.el ?? null;
+}
+
+/**
+ * Spatial navigation hook for TV D-pad.
+ * When tvMode is on, arrow keys move focus between focusable elements
+ * instead of seeking/volume.
  */
 export function useSpatialNav(
   containerRef: React.RefObject<HTMLElement | null>,
-  enabled: boolean,
-  onActivity?: () => void,
+  enabled: boolean
 ) {
+  const moveFocus = useCallback(
+    (direction: 'up' | 'down' | 'left' | 'right') => {
+      const container = containerRef.current;
+      if (!container) return false;
+
+      const active = document.activeElement as HTMLElement | null;
+      if (!active || !container.contains(active)) {
+        // No focus in container — focus first visible focusable
+        const first = container.querySelector(FOCUSABLE) as HTMLElement | null;
+        if (first && isVisible(first)) {
+          first.focus({ preventScroll: true });
+          return true;
+        }
+        return false;
+      }
+
+      // Gather all visible focusable elements
+      const all = Array.from(container.querySelectorAll(FOCUSABLE)) as HTMLElement[];
+      const visibleEls = all.filter(isVisible);
+      if (visibleEls.length <= 1) return false;
+
+      const rects = visibleEls.map(getRect);
+      const currentRect = getRect(active);
+      const next = findNextFocus(currentRect, rects, direction);
+
+      if (next) {
+        next.focus({ preventScroll: true });
+        // Scroll into view if inside a scrollable container
+        next.scrollIntoView?.({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
+        return true;
+      }
+
+      return false;
+    },
+    [containerRef]
+  );
+
   useEffect(() => {
     if (!enabled) return;
-    const container = containerRef.current;
-    if (!container) return;
 
-    const onKey = (e: KeyboardEvent) => {
-      const dirMap: Record<string, Dir> = {
-        ArrowLeft: 'left',
-        ArrowRight: 'right',
-        ArrowUp: 'up',
-        ArrowDown: 'down',
-      };
-      const dir = dirMap[e.key];
-      if (dir) {
-        const scope = getScope(container);
-        if (scope && move(dir, scope)) {
-          e.preventDefault();
-          e.stopImmediatePropagation();
-          onActivity?.();
-        }
-        return;
+    const handler = (e: KeyboardEvent) => {
+      // Skip if in input/textarea
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
+        // But still handle Enter and Escape in inputs on TV
+        if (e.key !== 'Enter' && e.key !== 'Escape' && e.key !== 'GoBack') return;
       }
-      if (e.key === 'Enter') {
-        const active = document.activeElement;
-        if (active instanceof HTMLElement && container.contains(active)) {
-          active.click();
-          e.preventDefault();
-          e.stopImmediatePropagation();
-          onActivity?.();
+
+      const state = usePlayerStore.getState();
+      let handled = false;
+
+      switch (e.key) {
+        case 'ArrowUp':
+          handled = moveFocus('up');
+          break;
+        case 'ArrowDown':
+          handled = moveFocus('down');
+          break;
+        case 'ArrowLeft':
+          // If no panel/drawer open, seek instead of nav
+          if (!state.isDrawerOpen && !document.activeElement?.closest('.omni-menu, .omni-stats, .omni-help, .omni-drawer')) {
+            return; // let the main keyboard handler do seek
+          }
+          handled = moveFocus('left');
+          break;
+        case 'ArrowRight':
+          if (!state.isDrawerOpen && !document.activeElement?.closest('.omni-menu, .omni-stats, .omni-help, .omni-drawer')) {
+            return;
+          }
+          handled = moveFocus('right');
+          break;
+
+        // Android TV Back button / Tizen back
+        case 'GoBack':
+        case 'XF86Back':
+        case 'BrowserBack':
+          // Treat as Escape — the main handler picks it up
+          const escEvent = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true });
+          window.dispatchEvent(escEvent);
+          handled = true;
+          break;
+
+        // Remote D-pad center / Enter
+        case 'Enter':
+          // If focused on a button, let the click fire naturally
+          if (document.activeElement instanceof HTMLButtonElement) {
+            document.activeElement.click();
+            handled = true;
+          }
+          break;
+
+        // ── Media Keys (Remote Play/Pause/Stop/FF/RW) ──
+        case 'MediaPlayPause':
+        case 'MediaPlay':
+          if (state.isPlaying && e.key === 'MediaPlayPause') {
+            const vid = document.querySelector('.omni-video') as HTMLVideoElement;
+            vid?.pause();
+          } else {
+            const vid = document.querySelector('.omni-video') as HTMLVideoElement;
+            vid?.play().catch(() => {});
+          }
+          handled = true;
+          break;
+        case 'MediaPause':
+        case 'MediaStop':
+          (document.querySelector('.omni-video') as HTMLVideoElement)?.pause();
+          handled = true;
+          break;
+        case 'MediaFastForward':
+        case 'MediaTrackNext':
+          {
+            const vid = document.querySelector('.omni-video') as HTMLVideoElement;
+            if (vid) vid.currentTime = Math.min(vid.duration || Infinity, vid.currentTime + 10);
+          }
+          handled = true;
+          break;
+        case 'MediaRewind':
+        case 'MediaTrackPrevious':
+          {
+            const vid = document.querySelector('.omni-video') as HTMLVideoElement;
+            if (vid) vid.currentTime = Math.max(0, vid.currentTime - 10);
+          }
+          handled = true;
+          break;
+
+        // Channel Up/Down (common on TV remotes)
+        case 'ChannelUp':
+        case 'ChannelDown': {
+          const channels = state.iptvChannels;
+          if (channels.length > 1) {
+            const currentIdx = channels.findIndex(c => c.id === state.activeChannelId);
+            const delta = e.key === 'ChannelUp' ? -1 : 1;
+            const nextIdx = (currentIdx + delta + channels.length) % channels.length;
+            state.selectChannel(channels[nextIdx].id);
+            handled = true;
+          }
+          break;
         }
+
+        // Color buttons (Samsung / LG remotes)
+        case 'ColorF0Red':
+          // Red = toggle captions
+          break;
+        case 'ColorF1Green':
+          // Green = toggle channels drawer
+          state.toggleDrawer();
+          handled = true;
+          break;
+        case 'ColorF2Yellow':
+          break;
+        case 'ColorF3Blue':
+          break;
+      }
+
+      if (handled) {
+        e.preventDefault();
+        e.stopPropagation();
+        // Keep controls visible on any TV interaction
+        state.setShowControls(true);
       }
     };
 
-    window.addEventListener('keydown', onKey, true);
-    return () => window.removeEventListener('keydown', onKey, true);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enabled, containerRef, onActivity]);
+    // Capture phase so we intercept before the main keyboard handler
+    window.addEventListener('keydown', handler, true);
+    return () => window.removeEventListener('keydown', handler, true);
+  }, [enabled, moveFocus]);
+
+  return { moveFocus };
+}
+
+/**
+ * Auto-focus management for TV: when controls become visible,
+ * move focus to the main play button.
+ */
+export function useTVAutoFocus(
+  containerRef: React.RefObject<HTMLElement | null>,
+  enabled: boolean
+) {
+  const showControls = usePlayerStore((s) => s.showControls);
+
+  useEffect(() => {
+    if (!enabled || !showControls) return;
+
+    // Small delay so DOM is updated
+    const timer = setTimeout(() => {
+      const container = containerRef.current;
+      if (!container) return;
+
+      const active = document.activeElement as HTMLElement | null;
+      // Don't steal focus if user is already focused inside a panel
+      if (active && container.contains(active) && isVisible(active)) return;
+
+      // Focus the main center play button
+      const mainBtn = container.querySelector('.omni-btn-main') as HTMLElement | null;
+      if (mainBtn && isVisible(mainBtn)) {
+        mainBtn.focus({ preventScroll: true });
+      }
+    }, 100);
+
+    return () => clearTimeout(timer);
+  }, [enabled, showControls, containerRef]);
 }

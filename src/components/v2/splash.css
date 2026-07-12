@@ -1,0 +1,190 @@
+/* ═══════════════════════════════════════════
+   Splash Overlay — Channel intro screen
+   Chrome 65+ · No backdrop-filter · No inset
+   ═══════════════════════════════════════════ */
+
+.splash-overlay {
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  z-index: 15;
+  display: -webkit-box; display: flex;
+  -webkit-box-align: center; align-items: center;
+  -webkit-box-pack: center; justify-content: center;
+  background: #000;
+  -webkit-animation: splashIn 0.4s ease;
+  animation: splashIn 0.4s ease;
+}
+@-webkit-keyframes splashIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes splashIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* Blurred background image */
+.splash-bg {
+  position: absolute;
+  top: -40px; left: -40px; right: -40px; bottom: -40px;
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  opacity: 0.15;
+  -webkit-filter: blur(40px) saturate(1.5);
+  filter: blur(40px) saturate(1.5);
+  -webkit-transform: scale(1.1);
+  transform: scale(1.1);
+}
+
+/* Center content */
+.splash-content {
+  position: relative;
+  display: -webkit-box; display: flex;
+  -webkit-box-orient: vertical; flex-direction: column;
+  -webkit-box-align: center; align-items: center;
+  z-index: 2;
+  -webkit-animation: splashFloat 0.6s ease both;
+  animation: splashFloat 0.6s ease both;
+  -webkit-animation-delay: 0.1s;
+  animation-delay: 0.1s;
+}
+@-webkit-keyframes splashFloat {
+  from { opacity: 0; -webkit-transform: translateY(20px) scale(0.95); }
+  to { opacity: 1; -webkit-transform: translateY(0) scale(1); }
+}
+@keyframes splashFloat {
+  from { opacity: 0; transform: translateY(20px) scale(0.95); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+/* Logo wrapper — holds img or glyph */
+.splash-logo-wrap {
+  position: relative;
+  width: 120px;
+  height: 120px;
+  display: -webkit-box; display: flex;
+  -webkit-box-align: center; align-items: center;
+  -webkit-box-pack: center; justify-content: center;
+  margin-bottom: 28px;
+}
+
+.splash-logo-img {
+  width: 80px;
+  height: 80px;
+  border-radius: 20px;
+  object-fit: contain;
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.1);
+  padding: 8px;
+}
+
+.splash-logo-glyph {
+  width: 80px;
+  height: 80px;
+  border-radius: 20px;
+  display: -webkit-box; display: flex;
+  -webkit-box-align: center; align-items: center;
+  -webkit-box-pack: center; justify-content: center;
+  font-size: 2.2rem;
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.08);
+}
+
+/* Spinner ring — orbits around the logo */
+.splash-ring {
+  position: absolute;
+  top: 0; left: 0;
+  width: 120px;
+  height: 120px;
+  border-radius: 50%;
+  border: 2px solid rgba(255,255,255,0.05);
+  border-top-color: #ef4444;
+  -webkit-animation: splashSpin 1.2s linear infinite;
+  animation: splashSpin 1.2s linear infinite;
+}
+@-webkit-keyframes splashSpin { to { -webkit-transform: rotate(360deg); } }
+@keyframes splashSpin { to { transform: rotate(360deg); } }
+
+/* Info text */
+.splash-info {
+  display: -webkit-box; display: flex;
+  -webkit-box-orient: vertical; flex-direction: column;
+  -webkit-box-align: center; align-items: center;
+}
+
+.splash-watching {
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 2px;
+  color: rgba(255,255,255,0.35);
+  margin-bottom: 8px;
+}
+
+.splash-name {
+  font-size: 1.4rem;
+  font-weight: 700;
+  color: #fff;
+  text-align: center;
+  max-width: 400px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-shadow: 0 2px 12px rgba(0,0,0,0.5);
+}
+
+.splash-live-tag {
+  display: inline-block;
+  margin-top: 12px;
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 1px;
+  color: #ef4444;
+  background: rgba(239,68,68,0.12);
+  border: 1px solid rgba(239,68,68,0.2);
+  padding: 4px 14px;
+  border-radius: 20px;
+  -webkit-animation: splashPulse 2s ease-in-out infinite;
+  animation: splashPulse 2s ease-in-out infinite;
+}
+@-webkit-keyframes splashPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+@keyframes splashPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+/* ── TV override — bigger for 10-foot ── */
+.tv-player .splash-logo-wrap {
+  width: 160px;
+  height: 160px;
+  margin-bottom: 36px;
+}
+.tv-player .splash-logo-img {
+  width: 110px;
+  height: 110px;
+  border-radius: 24px;
+  padding: 10px;
+}
+.tv-player .splash-logo-glyph {
+  width: 110px;
+  height: 110px;
+  border-radius: 24px;
+  font-size: 3rem;
+}
+.tv-player .splash-ring {
+  width: 160px;
+  height: 160px;
+  border-width: 3px;
+}
+.tv-player .splash-name {
+  font-size: 1.9rem;
+  max-width: 600px;
+}
+.tv-player .splash-watching {
+  font-size: 0.82rem;
+  letter-spacing: 3px;
+}

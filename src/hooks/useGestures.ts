@@ -1,249 +1,170 @@
-import { useEffect } from 'react';
+import { useEffect, useRef, useCallback } from 'react';
 import { usePlayerStore } from '../store/playerStore';
-import { formatTime } from '../lib/format';
 
-/**
- * Module-level guard so a touch-tap doesn't double-fire as a synthesized
- * mouse `click` on desktop-style handlers (e.g. the tap layer's onClick).
- * Returns true when the most recent touch interaction is recent.
- */
-let lastTouchAt = 0;
-export function consumeRecentTouch(): boolean {
-  return performance.now() - lastTouchAt < 450;
-}
-
-interface TouchState {
-  x: number;
-  y: number;
-  moved: boolean;
-  axis: 'none' | 'x' | 'y';
-  /** currentTime captured at gesture start (for horizontal seek). */
-  seekBase: number;
-  /** Volume captured at gesture start (for vertical right). */
-  volBase: number;
-  /** Brightness captured at gesture start (for vertical left). */
-  brightBase: number;
-}
-
-const THRESHOLD = 12; // px before an axis is locked
-const DOUBLE_TAP_MS = 300;
-const LONG_PRESS_MS = 480;
-
-/**
- * Touch gesture layer for mobile:
- *  - horizontal swipe  → seek (preview + commit on release)
- *  - right vertical     → volume
- *  - left vertical      → brightness (CSS filter on the video)
- *  - long press (hold)  → 2× speed while held
- *  - double tap         → ±10s (left / right half)
- *  - single tap         → play / pause (deferred so it can become a double-tap)
- */
 export function useGestures(
-  layerRef: React.RefObject<HTMLElement | null>,
-  videoRef: React.RefObject<HTMLVideoElement | null>,
+  tapLayerRef: React.RefObject<HTMLElement | null>,
+  videoRef: React.RefObject<HTMLVideoElement | null>
 ) {
+  const store = usePlayerStore;
+  const touchStartRef = useRef<{ x: number; y: number; time: number } | null>(null);
+  const gestureTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const longPressRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const wasLongPress = useRef(false);
+
+  const showHint = useCallback(
+    (type: 'seek' | 'volume' | 'brightness' | 'speed', value: string, secondary?: string) => {
+      store.getState().setGestureHint({ type, value, secondary });
+      if (gestureTimerRef.current) clearTimeout(gestureTimerRef.current);
+      gestureTimerRef.current = setTimeout(() => {
+        store.getState().setGestureHint(null);
+      }, 800);
+    },
+    []
+  );
+
   useEffect(() => {
-    const layer = layerRef.current;
-    const video = videoRef.current;
-    if (!layer || !video) return;
-
-    let st: TouchState | null = null;
-    let longPressTimer: ReturnType<typeof setTimeout> | null = null;
-    let pendingTap: ReturnType<typeof setTimeout> | null = null;
-    let originalRate = 1;
-    let lastTap = 0;
-    let rateBoosted = false;
-
-    const resetRateBoost = () => {
-      if (rateBoosted) {
-        rateBoosted = false;
-        usePlayerStore.getState().setPlaybackRate(originalRate);
-        usePlayerStore.getState().setGestureHint(null);
-      }
-    };
-
-    const clearLongPress = () => {
-      if (longPressTimer) {
-        clearTimeout(longPressTimer);
-        longPressTimer = null;
-      }
-    };
-
-    const cancelPendingTap = () => {
-      if (pendingTap) {
-        clearTimeout(pendingTap);
-        pendingTap = null;
-      }
-      lastTap = 0;
-    };
+    const el = tapLayerRef.current;
+    if (!el) return;
 
     const onTouchStart = (e: TouchEvent) => {
-      const t = e.touches[0];
-      if (!t) return;
-      const s = usePlayerStore.getState();
-      st = {
-        x: t.clientX,
-        y: t.clientY,
-        moved: false,
-        axis: 'none',
-        seekBase: video.currentTime,
-        volBase: s.volume,
-        brightBase: s.brightness,
-      };
-      originalRate = s.playbackRate;
-      clearLongPress();
-      longPressTimer = setTimeout(() => {
-        if (st && !st.moved && !rateBoosted) {
-          rateBoosted = true;
-          cancelPendingTap();
-          s.setPlaybackRate(2);
-          s.setGestureHint({ kind: 'speed', value: 2 });
+      const touch = e.touches[0];
+      touchStartRef.current = { x: touch.clientX, y: touch.clientY, time: Date.now() };
+      wasLongPress.current = false;
+
+      longPressRef.current = setTimeout(() => {
+        wasLongPress.current = true;
+        const video = videoRef.current;
+        if (video) {
+          video.playbackRate = 2;
+          showHint('speed', '2×', 'Long press speed');
         }
-      }, LONG_PRESS_MS);
+      }, 500);
     };
 
     const onTouchMove = (e: TouchEvent) => {
-      if (!st) return;
-      const t = e.touches[0];
-      if (!t) return;
-      const dx = t.clientX - st.x;
-      const dy = t.clientY - st.y;
-      const w = layer.clientWidth || window.innerWidth;
-      const h = layer.clientHeight || window.innerHeight;
-
-      if (st.axis === 'none') {
-        if (Math.abs(dx) < THRESHOLD && Math.abs(dy) < THRESHOLD) return;
-        st.axis = Math.abs(dx) > Math.abs(dy) ? 'x' : 'y';
-        clearLongPress();
-        cancelPendingTap(); // a swipe is not a tap
-        st.moved = true;
+      if (!touchStartRef.current) return;
+      if (longPressRef.current) {
+        clearTimeout(longPressRef.current);
+        longPressRef.current = null;
       }
 
-      if (st.axis === 'x') {
-        e.preventDefault();
-        const dur = Number.isFinite(video.duration) ? video.duration : 0;
-        // Full-width swipe spans the whole duration.
-        const deltaSec = (dx / w) * dur;
-        const target = Math.min(dur || 0, Math.max(0, st.seekBase + deltaSec));
-        usePlayerStore.getState().setGestureHint({
-          kind: 'seek',
-          value: target,
-          forward: deltaSec >= 0,
-        });
-      } else {
-        e.preventDefault();
-        const onRight = st.x > w / 2;
-        if (onRight) {
-          const vol = Math.min(1, Math.max(0, st.volBase + -dy / h));
-          usePlayerStore.getState().setVolume(vol);
-          usePlayerStore.getState().setGestureHint({ kind: 'volume', value: vol });
+      const touch = e.touches[0];
+      const dx = touch.clientX - touchStartRef.current.x;
+      const dy = touch.clientY - touchStartRef.current.y;
+      const rect = el.getBoundingClientRect();
+      const isLeftSide = touchStartRef.current.x < rect.left + rect.width / 2;
+
+      if (Math.abs(dx) > Math.abs(dy) && Math.abs(dx) > 30) {
+        // Horizontal swipe = seek
+        const video = videoRef.current;
+        if (video && Number.isFinite(video.duration)) {
+          const seekAmount = (dx / rect.width) * video.duration * 0.3;
+          const sign = seekAmount > 0 ? '+' : '';
+          showHint('seek', `${sign}${Math.round(seekAmount)}s`);
+        }
+      } else if (Math.abs(dy) > 30) {
+        // Vertical swipe
+        const change = -dy / rect.height;
+        if (isLeftSide) {
+          // Brightness
+          const newBright = Math.max(0.2, Math.min(1.5, store.getState().brightness + change * 0.5));
+          store.getState().setBrightness(newBright);
+          showHint('brightness', `${Math.round(newBright * 100)}%`);
         } else {
-          const bright = Math.min(1.8, Math.max(0.25, st.brightBase + -dy / h));
-          usePlayerStore.getState().setBrightness(bright);
-          usePlayerStore.getState().setGestureHint({ kind: 'brightness', value: bright });
+          // Volume
+          const newVol = Math.max(0, Math.min(1, store.getState().volume + change * 0.5));
+          store.getState().setVolume(newVol);
+          showHint('volume', `${Math.round(newVol * 100)}%`);
         }
       }
     };
 
     const onTouchEnd = (e: TouchEvent) => {
-      clearLongPress();
-      resetRateBoost();
-      lastTouchAt = performance.now();
-      if (!st) return;
+      if (longPressRef.current) {
+        clearTimeout(longPressRef.current);
+        longPressRef.current = null;
+      }
 
-      const wasMove = st.moved && st.axis !== 'none';
-      if (wasMove) {
-        if (st.axis === 'x') {
-          // Commit the horizontal seek previewed during the drag.
-          const hint = usePlayerStore.getState().gestureHint;
-          if (hint && hint.kind === 'seek') {
-            video.currentTime = hint.value;
-          }
+      if (wasLongPress.current) {
+        const video = videoRef.current;
+        if (video) {
+          video.playbackRate = store.getState().playbackRate;
         }
-        usePlayerStore.getState().setGestureHint(null);
-        st = null;
+        wasLongPress.current = false;
+        touchStartRef.current = null;
         return;
       }
 
-      // ---- Tap detection ----
+      if (!touchStartRef.current) return;
       const touch = e.changedTouches[0];
-      const now = performance.now();
-      const sinceLast = now - lastTap;
-      st = null;
+      const dx = touch.clientX - touchStartRef.current.x;
+      const rect = el.getBoundingClientRect();
 
-      if (sinceLast > 0 && sinceLast < DOUBLE_TAP_MS && touch) {
-        // Double tap → ±10s by screen half. Cancel the pending single-tap.
-        cancelPendingTap();
-        const onLeft = touch.clientX < (layer.clientWidth || window.innerWidth) / 2;
-        const dur = Number.isFinite(video.duration) ? video.duration : Infinity;
-        const target = Math.min(dur, Math.max(0, video.currentTime + (onLeft ? -10 : 10)));
-        video.currentTime = target;
-        usePlayerStore.getState().setGestureHint({
-          kind: 'seek',
-          value: target,
-          forward: !onLeft,
-        });
-        setTimeout(() => usePlayerStore.getState().setGestureHint(null), 650);
-        return;
+      if (Math.abs(dx) > 30) {
+        // Apply seek
+        const video = videoRef.current;
+        if (video && Number.isFinite(video.duration)) {
+          const seekAmount = (dx / rect.width) * video.duration * 0.3;
+          video.currentTime = Math.max(0, Math.min(video.duration, video.currentTime + seekAmount));
+        }
       }
 
-      // Single tap → play / pause, deferred in case a 2nd tap makes it a double.
-      const firedAt = now;
-      lastTap = now;
-      pendingTap = setTimeout(() => {
-        pendingTap = null;
-        if (lastTap === firedAt) {
-          if (video.paused) video.play().catch(() => {});
-          else video.pause();
-        }
-      }, DOUBLE_TAP_MS);
+      touchStartRef.current = null;
     };
 
-    const onTouchCancel = () => {
-      clearLongPress();
-      resetRateBoost();
-      cancelPendingTap();
-      usePlayerStore.getState().setGestureHint(null);
-      st = null;
-    };
-
-    layer.addEventListener('touchstart', onTouchStart, { passive: true });
-    layer.addEventListener('touchmove', onTouchMove, { passive: false });
-    layer.addEventListener('touchend', onTouchEnd);
-    layer.addEventListener('touchcancel', onTouchCancel);
+    el.addEventListener('touchstart', onTouchStart, { passive: true });
+    el.addEventListener('touchmove', onTouchMove, { passive: true });
+    el.addEventListener('touchend', onTouchEnd, { passive: true });
 
     return () => {
-      layer.removeEventListener('touchstart', onTouchStart);
-      layer.removeEventListener('touchmove', onTouchMove);
-      layer.removeEventListener('touchend', onTouchEnd);
-      layer.removeEventListener('touchcancel', onTouchCancel);
-      clearLongPress();
-      cancelPendingTap();
+      el.removeEventListener('touchstart', onTouchStart);
+      el.removeEventListener('touchmove', onTouchMove);
+      el.removeEventListener('touchend', onTouchEnd);
+      if (longPressRef.current) clearTimeout(longPressRef.current);
+      if (gestureTimerRef.current) clearTimeout(gestureTimerRef.current);
     };
-  }, [layerRef, videoRef]);
+  }, [showHint]);
 }
 
-/** Build the textual label shown inside the on-screen gesture indicator. */
-export function gestureHintLabel(hint: {
-  kind: 'seek' | 'volume' | 'brightness' | 'speed';
-  value: number;
-  forward?: boolean;
-}): { icon: string; primary: string; secondary?: string } {
-  switch (hint.kind) {
-    case 'seek':
-      return {
-        icon: hint.forward ? '⏩' : '⏪',
-        primary: formatTime(hint.value),
-        secondary: hint.forward ? '+10s' : '-10s',
-      };
-    case 'volume':
-      return {
-        icon: hint.value <= 0 ? '🔇' : hint.value < 0.5 ? '🔉' : '🔊',
-        primary: `${Math.round(hint.value * 100)}%`,
-      };
-    case 'brightness':
-      return { icon: '☀️', primary: `${Math.round(hint.value * 100)}%` };
-    case 'speed':
-      return { icon: '⚡', primary: `${hint.value}×`, secondary: 'Hold for fast' };
-  }
+export function useDoubleTapSeek(
+  tapLayerRef: React.RefObject<HTMLElement | null>,
+  videoRef: React.RefObject<HTMLVideoElement | null>,
+  showControlsFn: () => void
+) {
+  const lastTapRef = useRef<{ time: number; x: number } | null>(null);
+
+  useEffect(() => {
+    const el = tapLayerRef.current;
+    if (!el) return;
+
+    const handler = (e: MouseEvent) => {
+      const now = Date.now();
+      const rect = el.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const isLeft = x < rect.width / 3;
+      const isRight = x > (rect.width * 2) / 3;
+
+      if (lastTapRef.current && now - lastTapRef.current.time < 300) {
+        // Double tap
+        const video = videoRef.current;
+        if (video) {
+          if (isLeft) {
+            video.currentTime = Math.max(0, video.currentTime - 10);
+            usePlayerStore.getState().setGestureHint({ type: 'seek', value: '-10s' });
+          } else if (isRight) {
+            video.currentTime = Math.min(video.duration || Infinity, video.currentTime + 10);
+            usePlayerStore.getState().setGestureHint({ type: 'seek', value: '+10s' });
+          }
+          setTimeout(() => usePlayerStore.getState().setGestureHint(null), 800);
+        }
+        lastTapRef.current = null;
+        e.preventDefault();
+        return;
+      }
+      lastTapRef.current = { time: now, x: e.clientX };
+    };
+
+    el.addEventListener('dblclick', handler);
+    return () => el.removeEventListener('dblclick', handler);
+  }, [showControlsFn]);
 }

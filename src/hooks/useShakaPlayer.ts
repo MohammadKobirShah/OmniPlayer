@@ -1,500 +1,464 @@
-import { useEffect, useMemo, useRef } from 'react';
+import { useEffect, useRef, useCallback } from 'react';
 import shaka from 'shaka-player';
-import { useShallow } from 'zustand/react/shallow';
-import { usePlayerStore } from '../store/playerStore';
-import { qualityLabel } from '../lib/format';
-import type { DrmConfig } from '../lib/streams';
-import {
-  resolveProxiedRequest,
-  needsProxy as headersNeedProxy,
-  isProxyConfigured,
-} from '../lib/proxy';
+import { usePlayerStore, hotState, type QualityLevel, type AudioTrack, type TextTrack, type DRMConfig } from '../store/playerStore';
+import { getLanguageName } from '../utils/languageNames';
 
-/* shaka's compiled stats object – treated loosely for ergonomics. */
-type ShakaStats = {
-  width?: number;
-  height?: number;
-  streamBandwidth?: number;
-  estimatedBandwidth?: number;
-  bufferedAhead?: number;
-  droppedFrames?: number;
-  decodedFrames?: number;
-  completionPercent?: number;
-  playTime?: number;
-};
-
-const LANGUAGE_NAMES: Record<string, string> = {
-  en: 'English',
-  es: 'Español',
-  fr: 'Français',
-  de: 'Deutsch',
-  it: 'Italiano',
-  ja: '日本語',
-  'pt-BR': 'Português (BR)',
-  pt: 'Português',
-  ru: 'Русский',
-  ar: 'العربية',
-  hi: 'हिन्दी',
-  zh: '中文',
-  mul: 'Multiple',
-  und: 'Unknown',
-};
-
-function languageName(code: string): string {
-  if (!code) return 'Unknown';
-  return LANGUAGE_NAMES[code] || code.toUpperCase();
+// ── Install polyfills ONCE at module load, not per mount ──
+let _polyfilled = false;
+if (!_polyfilled) {
+  shaka.polyfill.installAll();
+  _polyfilled = true;
 }
 
-function bufferedAheadFromVideo(video: HTMLVideoElement): number {
-  try {
-    for (let i = 0; i < video.buffered.length; i++) {
-      const start = video.buffered.start(i);
-      const end = video.buffered.end(i);
-      if (video.currentTime >= start && video.currentTime <= end) {
-        return Math.max(0, end - video.currentTime);
-      }
+// ── Lightweight rAF loop: pushes time to UI at ~4fps ──
+let _rafId = 0;
+let _lastPush = 0;
+let _rafRunning = false;
+function startUIPushLoop() {
+  if (_rafRunning) return;
+  _rafRunning = true;
+  const tick = () => {
+    if (!_rafRunning) return;
+    const now = performance.now();
+    if (now - _lastPush > 250) {
+      usePlayerStore.getState().pushTimeToUI();
+      _lastPush = now;
     }
-  } catch {
-    /* buffered not yet available */
-  }
-  return 0;
+    _rafId = requestAnimationFrame(tick);
+  };
+  _rafId = requestAnimationFrame(tick);
 }
-
-/** Imperative API surface returned to the UI for track / quality control. */
-export interface ShakaController {
-  selectQuality: (id: number | null) => void;
-  selectAudioLanguage: (lang: string) => void;
-  selectTextTrack: (id: number | null) => void;
-  toggleCaptions: (on: boolean) => void;
+function stopUIPushLoop() {
+  _rafRunning = false;
+  cancelAnimationFrame(_rafId);
 }
 
 export function useShakaPlayer(
   videoRef: React.RefObject<HTMLVideoElement | null>,
-  manifestUri: string,
-  drmConfig?: DrmConfig,
-  reloadKey = 0,
-  httpHeaders?: Record<string, string>,
-): ShakaController {
+  manifestUrl: string,
+  drm?: DRMConfig,
+  retryKey = 0,
+  headers?: Record<string, string>
+) {
   const playerRef = useRef<shaka.Player | null>(null);
-  const headersKey = httpHeaders ? JSON.stringify(httpHeaders) : '';
-  const needsProxy = headersNeedProxy(httpHeaders);
-  const proxyReady = isProxyConfigured();
+  const statsIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const cleanedUp = useRef(false);
 
-  const store = usePlayerStore(
-    useShallow((s) => ({
-      setPlaying: s.setPlaying,
-      setCurrentTime: s.setCurrentTime,
-      setDuration: s.setDuration,
-      setBuffering: s.setBuffering,
-      setReady: s.setReady,
-      setStats: s.setStats,
-      setQualities: s.setQualities,
-      setAudioTracks: s.setAudioTracks,
-      setTextTracks: s.setTextTracks,
-      setCurrentQualityId: s.setCurrentQualityId,
-      setCurrentAudioLanguage: s.setCurrentAudioLanguage,
-      setCurrentTextId: s.setCurrentTextId,
-      setAbrEnabled: s.setAbrEnabled,
-      setCaptions: s.setCaptions,
-      setError: s.setError,
-      resetPlayback: s.resetPlayback,
-      volume: s.volume,
-      isMuted: s.isMuted,
-      playbackRate: s.playbackRate,
-    })),
-  );
+  const store = usePlayerStore;
 
-  /* ----------------------- Engine init / teardown ----------------------- */
   useEffect(() => {
     const video = videoRef.current;
-    if (!video || !manifestUri) return;
+    if (!video || !manifestUrl) return;
 
-    shaka.polyfill.installAll();
+    cleanedUp.current = false;
 
     if (!shaka.Player.isBrowserSupported()) {
-      store.setError({
+      store.getState().setError({
         code: 'UNSUPPORTED',
-        severity: 'critical',
-        message: 'This browser is not supported by the Shaka engine.',
-        hint: 'Try the latest Chrome, Edge or Firefox.',
+        message: 'Browser not supported',
+        hint: 'Try Chrome, Edge, or Firefox for full playback support.',
       });
       return;
     }
 
-    let cancelled = false;
-    let player: shaka.Player | null = null;
-    let statsTimer: ReturnType<typeof setInterval> | null = null;
-    let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+    // ── Prepare video element for fastest possible start ──
+    video.autoplay = true;
+    video.preload = 'auto';
+    video.volume = store.getState().volume;
+    video.muted = store.getState().isMuted;
 
-    const refreshTracks = (p: shaka.Player) => {
-      const variants: any[] = (p as any).getVariantTracks?.() ?? [];
-
-      // Qualities – one entry per unique height (highest bandwidth wins).
-      const byHeight = new Map<number, any>();
-      variants.forEach((v) => {
-        if (!v.height) return;
-        const ex = byHeight.get(v.height);
-        if (!ex || (v.bandwidth || 0) > (ex.bandwidth || 0)) byHeight.set(v.height, v);
-      });
-      store.setQualities(
-        [...byHeight.values()]
-          .sort((a, b) => b.height - a.height)
-          .map((v) => ({
-            id: v.id,
-            height: v.height,
-            bandwidth: v.bandwidth,
-            label: qualityLabel(v.height, v.bandwidth),
-          })),
-      );
-
-      // Audio languages.
-      const langMap = new Map<string, any>();
-      variants.forEach((v) => {
-        if (v.language && !langMap.has(v.language)) langMap.set(v.language, v);
-      });
-      store.setAudioTracks(
-        [...langMap.values()].map((v) => ({
-          id: v.id,
-          language: v.language,
-          label: languageName(v.language),
-        })),
-      );
-      const active = variants.find((v) => v.active && v.language);
-      if (active?.language) store.setCurrentAudioLanguage(active.language);
-
-      // Text tracks.
-      const texts: any[] = (p as any).getTextTracks?.() ?? [];
-      store.setTextTracks(
-        texts.map((t) => ({
-          id: t.id,
-          language: t.language,
-          label: languageName(t.language),
-        })),
-      );
-    };
-
-    const tickStats = () => {
-      const p = playerRef.current;
-      const v = videoRef.current;
-      if (!p || !v) return;
-      const s: ShakaStats = (p as any).getStats?.() ?? {};
-      store.setStats({
-        width: s.width ?? 0,
-        height: s.height ?? 0,
-        bitrate: Math.round((s.streamBandwidth ?? 0) / 1000),
-        estimatedBandwidth: Math.round((s.estimatedBandwidth ?? 0) / 1000),
-        bufferedAhead: s.bufferedAhead ?? bufferedAheadFromVideo(v),
-        droppedFrames: s.droppedFrames ?? 0,
-        decodedFrames: s.decodedFrames ?? 0,
-        completionPercent: s.completionPercent ?? 0,
-        playTime: s.playTime ?? 0,
-      });
-    };
-
-    const mapError = (e: any) => {
-      const code = e?.code ?? 'UNKNOWN';
-      const category = e?.category;
-      let message = e?.message || 'The stream could not be loaded.';
-      let hint: string | undefined;
-      if (category === 6) {
-        message = 'Content-protection (DRM) error.';
-        hint = 'Widevine streams require Chrome or Edge over a secure HTTPS origin.';
-      } else if (category === 1) {
-        message = 'Network error — the stream could not be reached.';
-        hint = 'Check your connection or that the origin allows cross-origin requests (CORS).';
-      } else if (category === 4) {
-        message = 'The manifest could not be parsed.';
-      } else if (category === 2 || category === 3) {
-        message = 'A media segment failed to load.';
-      }
-      store.setError({ code, category, message, hint, severity: 'fatal' });
-    };
-
-    // <video> handlers live at effect scope so cleanup can remove them even
-    // if init is still in flight (avoids leaking listeners across reloads).
-    let onPlay: (() => void) | null = null;
-    let onPause: (() => void) | null = null;
-    let onTime: (() => void) | null = null;
-    let onDuration: (() => void) | null = null;
-    let onWaiting: (() => void) | null = null;
-    let onPlaying: (() => void) | null = null;
-
-    const detachVideoListeners = () => {
-      const v = videoRef.current;
-      if (!v) return;
-      if (onPlay) v.removeEventListener('play', onPlay);
-      if (onPause) v.removeEventListener('pause', onPause);
-      if (onTime) v.removeEventListener('timeupdate', onTime);
-      if (onDuration) {
-        v.removeEventListener('durationchange', onDuration);
-        v.removeEventListener('loadedmetadata', onDuration);
-      }
-      if (onWaiting) v.removeEventListener('waiting', onWaiting);
-      if (onPlaying) {
-        v.removeEventListener('playing', onPlaying);
-        v.removeEventListener('canplay', onPlaying);
-      }
-    };
+    // ── Create player — NO await, no attach delay ──
+    const player = new shaka.Player();
+    playerRef.current = player;
 
     const init = async () => {
       try {
-        player = new shaka.Player();
-        playerRef.current = player;
+        // attach is required but very fast (creates MediaSource)
         await player.attach(video);
+        if (cleanedUp.current) return;
+
+        // ── Two-phase ABR: fast startup → stable steady-state ──
+        // Phase 1 (startup): rebufferingGoal=0.5, fast retries, play ASAP
+        // Phase 2 (after first play): rebufferingGoal=2, stable ABR
+
+        // Use persisted bandwidth from last session — returning users get right quality instantly
+        const savedBW = parseInt(localStorage.getItem('omni-bw-estimate') || '0', 10);
+        const startBW = savedBW > 500_000 ? savedBW : 1_600_000; // fallback 1.6Mbps
 
         player.configure({
-          drm: drmConfig?.servers
-            ? {
-                servers: drmConfig.servers,
-                // Widevine advanced: L3 software crypto works on most devices.
-                // Bump to 'HW_SECURE_ALL' to require Level 1 (secure path).
-                advanced: {
-                  'com.widevine.alpha': {
-                    videoRobustness: 'SW_SECURE_CRYPTO',
-                    audioRobustness: 'SW_SECURE_CRYPTO',
-                    sessionType: 'temporary',
-                  },
-                },
-              }
-            : {},
-          abr: { enabled: true },
           streaming: {
-            bufferingGoal: 15, // PRD: 15s buffer health
-            rebufferingGoal: 5,
+            bufferingGoal: 10,
+            rebufferingGoal: 0.5,       // Phase 1: play almost instantly
             bufferBehind: 30,
-            // Tolerate IPTV manifests with drifting segment timestamps.
-            ignoreManifestTimestampsInSegmentsMode: true,
-            // Reuse MSE buffers across variant switches to avoid rebuffering.
-            // (default already good; keep engine defaults for the rest.)
+            jumpLargeGaps: true,
+            retryParameters: {
+              maxAttempts: 3,
+              baseDelay: 300,
+              backoffFactor: 1.5,
+              fuzzFactor: 0.3,
+              timeout: 10000,
+            },
           },
-          preferredTextLanguage: (navigator.language || 'en').slice(0, 2),
+          abr: {
+            enabled: true,
+            useNetworkInformation: true,
+            defaultBandwidthEstimate: startBW,
+            switchInterval: 8,
+            bandwidthUpgradeTarget: 0.85,
+            bandwidthDowngradeTarget: 0.95,
+            clearBufferSwitch: false,       // ★ never flush buffer on auto switch
+            safeMarginSwitch: 0,            // ★ no extra margin needed since we don't clear
+          },
+          manifest: {
+            retryParameters: {
+              maxAttempts: 2,
+              baseDelay: 200,
+              backoffFactor: 1.5,
+              fuzzFactor: 0.3,
+              timeout: 8000,
+            },
+          },
         });
 
-        // === Custom HTTP headers (protected IPTV streams) ===
-        // Browsers forbid setting User-Agent/Cookie/Referer directly, so we
-        // route through a proxy and forward those as X- prefixed headers.
-        if (httpHeaders && Object.keys(httpHeaders).length > 0) {
-          if (needsProxy && !proxyReady) {
-            store.setError({
-              code: 'PROXY_REQUIRED',
-              severity: 'fatal',
-              message: 'This stream requires custom HTTP headers.',
-              hint:
-                'Set a proxy base (Settings → Proxy) so User-Agent/Cookie can be injected server-side.',
-            });
-            throw new Error('Proxy not configured for protected stream.');
+        // ── DRM Configuration ──
+        if (drm) {
+          if (drm.type === 'clearkey' && drm.clearKeys?.length) {
+            const clearKeyMap: Record<string, string> = {};
+            for (const pair of drm.clearKeys) {
+              clearKeyMap[pair.kid] = pair.key;
+            }
+            player.configure('drm.clearKeys', clearKeyMap);
+          } else if (drm.servers && Object.keys(drm.servers).length > 0) {
+            player.configure('drm.servers', drm.servers);
           }
-          const eng = (player as any).getNetworkingEngine?.();
-          eng?.registerRequestFilter((type: number, request: any) => {
-            const Manifest = shaka.net.NetworkingEngine.RequestType.MANIFEST;
-            const Segment = shaka.net.NetworkingEngine.RequestType.SEGMENT;
-            // NOTE: intentionally NOT handling LICENSE — DRM license requests
-            // go to the license server, not the content origin. Routing them
-            // through the content proxy or attaching stream Cookies/User-Agent
-            // would break DRM and leak credentials.
-            if (type !== Manifest && type !== Segment) return;
-            const uri = request.uris?.[0];
-            if (!uri) return;
-            const resolved = resolveProxiedRequest(uri, httpHeaders);
-            request.uris = [resolved.uri];
-            request.headers = { ...(request.headers || {}), ...resolved.safe, ...resolved.proxied };
-          });
         }
 
-        const onBuffering = (e: any) => store.setBuffering(!!e.buffering);
-        const onTracksChanged = () => player && refreshTracks(player);
-        const onAdaptation = () => tickStats();
-        const onPlayerError = (e: any) => mapError(e?.detail ?? e);
+        // ── Custom headers (from #EXTVLCOPT / #EXTHTTP / URL pipe) ──
+        if (headers && Object.keys(headers).length > 0) {
+          var net = player.getNetworkingEngine();
+          if (net) {
+            net.registerRequestFilter(function(_type: any, request: any) {
+              if (request.headers) {
+                for (var k in headers) {
+                  if (headers.hasOwnProperty(k)) {
+                    request.headers[k] = headers[k];
+                  }
+                }
+              }
+            });
+          }
+        }
 
-        player.addEventListener('buffering', onBuffering);
-        player.addEventListener('trackschanged', onTracksChanged);
-        player.addEventListener('adaptation', onAdaptation);
-        player.addEventListener('error', onPlayerError);
+        // ── Shaka events ──
+        player.addEventListener('error', (event: any) => {
+          if (cleanedUp.current) return;
+          const detail = event.detail;
+          store.getState().setError({
+            code: detail?.code ?? 'UNKNOWN',
+            message: detail?.message ?? 'Playback error occurred',
+            hint: 'Try reloading or switching to a different stream.',
+          });
+        });
 
-        // <video> element listeners — defined at effect scope so cleanup can
-        // remove them (otherwise they leak across reloads / channel switches).
-        onPlay = () => store.setPlaying(true);
-        onPause = () => store.setPlaying(false);
-        onTime = () => store.setCurrentTime(video.currentTime);
-        onDuration = () => store.setDuration(video.duration);
-        onWaiting = () => store.setBuffering(true);
-        onPlaying = () => store.setBuffering(false);
+        player.addEventListener('buffering', (event: any) => {
+          if (cleanedUp.current) return;
+          store.getState().setIsBuffering(event.buffering);
+        });
+
+        player.addEventListener('adaptation', () => {
+          if (!cleanedUp.current) updateQualities(player);
+        });
+
+        player.addEventListener('trackschanged', () => {
+          if (cleanedUp.current) return;
+          updateQualities(player);
+          updateAudioTracks(player);
+          updateTextTracks(player);
+        });
+
+        // ── Video element events ──
+        let startupDone = false;
+
+        const onPlay = () => {
+          if (cleanedUp.current) return;
+          store.getState().setIsPlaying(true);
+
+          // ★ Phase 2: once playback actually starts, switch to stable config.
+          // This is the YouTube technique — fast start, then lock down for stability.
+          if (!startupDone) {
+            startupDone = true;
+            setTimeout(() => {
+              if (cleanedUp.current) return;
+              player.configure({
+                streaming: {
+                  rebufferingGoal: 2,     // Phase 2: stable rebuffering
+                  retryParameters: {
+                    maxAttempts: 4,
+                    baseDelay: 1000,
+                    backoffFactor: 2,
+                    fuzzFactor: 0.5,
+                    timeout: 20000,
+                  },
+                },
+              });
+            }, 3000); // wait 3s after first play before switching phase
+          }
+        };
+        const onPause = () => { if (!cleanedUp.current) store.getState().setIsPlaying(false); };
+        const onEnded = () => { if (!cleanedUp.current) store.getState().setIsPlaying(false); };
+        const onWaiting = () => { if (!cleanedUp.current) store.getState().setIsBuffering(true); };
+
+        const onCanPlay = () => {
+          if (cleanedUp.current) return;
+          store.getState().setIsBuffering(false);
+          store.getState().setIsReady(true);
+          if (Number.isFinite(video.duration)) {
+            hotState.duration = video.duration;
+          }
+        };
+
+        // timeupdate → mutable hotState only (zero re-renders)
+        const onTimeUpdate = () => {
+          hotState.currentTime = video.currentTime;
+          const dur = video.duration;
+          if (Number.isFinite(dur)) {
+            hotState.duration = dur;
+            hotState.stats.completionPercent = (video.currentTime / dur) * 100;
+          }
+          if (video.buffered.length > 0) {
+            const end = video.buffered.end(video.buffered.length - 1);
+            hotState.bufferedFraction = Number.isFinite(dur) ? end / dur : 0;
+            hotState.stats.bufferedAhead = Math.max(0, end - video.currentTime);
+          }
+        };
+
         video.addEventListener('play', onPlay);
         video.addEventListener('pause', onPause);
-        video.addEventListener('timeupdate', onTime);
-        video.addEventListener('durationchange', onDuration);
-        video.addEventListener('loadedmetadata', onDuration);
+        video.addEventListener('ended', onEnded);
         video.addEventListener('waiting', onWaiting);
-        video.addEventListener('playing', onPlaying);
-        video.addEventListener('canplay', onPlaying);
+        video.addEventListener('canplay', onCanPlay);
+        video.addEventListener('timeupdate', onTimeUpdate);
 
-        try {
-          await player.load(manifestUri);
-          if (cancelled) return;
-          store.setDuration(video.duration || 0);
-          store.setReady(true);
-          store.setError(null);
-          refreshTracks(player);
-          statsTimer = setInterval(tickStats, 1000);
-          tickStats();
-            // Best-effort autoplay (browsers may block sound until interaction).
-            try {
-              await video.play();
-            } catch {
-              store.setPlaying(false);
+        // ── LOAD THE STREAM — this is the main async operation ──
+        await player.load(manifestUrl);
+        if (cleanedUp.current) return;
+
+        // ★ Only AFTER load succeeds: start rAF + stats
+        startUIPushLoop();
+
+        let _bwSaveCounter = 0;
+        statsIntervalRef.current = setInterval(() => {
+          if (cleanedUp.current) return;
+          try {
+            const s = player.getStats();
+            hotState.stats.width = s.width;
+            hotState.stats.height = s.height;
+            hotState.stats.estimatedBandwidth = s.estimatedBandwidth;
+            hotState.stats.decodedFrames = s.decodedFrames;
+            hotState.stats.droppedFrames = s.droppedFrames;
+            hotState.stats.bitrate = s.streamBandwidth;
+            store.getState().pushStatsToUI();
+
+            // Persist bandwidth estimate every ~10s for next session
+            _bwSaveCounter++;
+            if (_bwSaveCounter % 5 === 0 && s.estimatedBandwidth > 0) {
+              localStorage.setItem('omni-bw-estimate', String(Math.round(s.estimatedBandwidth)));
             }
+          } catch { /* destroyed */ }
+        }, 2000);
 
-            // Memory-leak prevention: long-running live IPTV sessions can
-            // accumulate garbage over many hours. Re-arm the manifest every 4h
-            // (recurring for the life of the session), restoring the playhead
-            // for VOD while letting live jump to the edge.
-            const REFRESH_INTERVAL = 4 * 60 * 60 * 1000;
-            const scheduleRefresh = () => {
-              refreshTimer = setTimeout(doRefresh, REFRESH_INTERVAL);
-            };
-            const doRefresh = async () => {
-              const p = playerRef.current;
-              if (cancelled || !p) return;
-              const resume = video.currentTime;
-              const wasPlaying = !video.paused;
-              try {
-                store.setBuffering(true);
-                await p.detach();
-                await p.attach(video);
-                await p.load(manifestUri);
-                if (cancelled) return;
-                if (Number.isFinite(video.duration) && resume < video.duration - 30) {
-                  video.currentTime = resume;
-                }
-                refreshTracks(p);
-                tickStats();
-                if (wasPlaying) await video.play().catch(() => {});
-                else store.setBuffering(false);
-                // Re-arm for the next interval.
-                if (!cancelled) scheduleRefresh();
-              } catch (e) {
-                if (!cancelled) mapError(e);
-              }
-            };
-            scheduleRefresh();
-          } catch (e) {
-            if (!cancelled) mapError(e);
-          }
-      } catch (e) {
-        if (!cancelled) mapError(e);
+        // Ensure playback starts (autoplay might be blocked)
+        video.play().catch(() => {});
+
+      } catch (err: any) {
+        if (cleanedUp.current) return;
+        store.getState().setError({
+          code: err.code ?? 'LOAD_ERROR',
+          message: err.message || 'Failed to load stream',
+          hint: 'Check the stream URL or try a different stream.',
+        });
       }
     };
 
     init();
 
     return () => {
-      cancelled = true;
-      if (statsTimer) clearInterval(statsTimer);
-      if (refreshTimer) clearTimeout(refreshTimer);
-      detachVideoListeners();
-      store.setReady(false);
-      store.setBuffering(false);
-      const p = playerRef.current;
-      if (p) {
-        try {
-          p.destroy();
-        } catch {
-          /* ignore */
-        }
+      cleanedUp.current = true;
+      stopUIPushLoop();
+      if (statsIntervalRef.current) {
+        clearInterval(statsIntervalRef.current);
+        statsIntervalRef.current = null;
       }
+
+      player.destroy().catch(() => {});
       playerRef.current = null;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [manifestUri, reloadKey, headersKey, needsProxy, proxyReady]);
+  }, [manifestUrl, retryKey]);
 
-  /* ----------------------- Volume / mute sync --------------------------- */
+  // Sync volume/mute/rate from store → video (only on actual change)
   useEffect(() => {
-    const v = videoRef.current;
-    if (!v) return;
-    v.volume = store.volume;
-    v.muted = store.isMuted;
-  }, [store.volume, store.isMuted, videoRef]);
+    const unsub = store.subscribe((state, prev) => {
+      const video = videoRef.current;
+      if (!video) return;
+      if (state.volume !== prev.volume) video.volume = state.volume;
+      if (state.isMuted !== prev.isMuted) video.muted = state.isMuted;
+      if (state.playbackRate !== prev.playbackRate) video.playbackRate = state.playbackRate;
+    });
+    return unsub;
+  }, []);
 
-  /* ----------------------- Playback rate sync --------------------------- */
-  useEffect(() => {
-    const v = videoRef.current;
-    if (!v) return;
-    v.playbackRate = store.playbackRate;
-  }, [store.playbackRate, videoRef]);
+  const selectQuality = useCallback((id: number | null) => {
+    const player = playerRef.current;
+    if (!player) return;
+    store.getState().selectQuality(id);
+    if (id === null) {
+      player.configure('abr.enabled', true);
+    } else {
+      player.configure('abr.enabled', false);
+      const tracks = player.getVariantTracks();
+      const target = tracks.find((t) => t.id === id);
+      // ★ clearBuffer=false — play existing buffer, new segments download in new quality.
+      // This is how YouTube does it: zero gap, zero stall, seamless transition.
+      if (target) player.selectVariantTrack(target, false);
+    }
+  }, []);
 
-  /* ----------------------- Imperative controller ------------------------ */
-  const controller = useMemo<ShakaController>(
-    () => ({
-      selectQuality: (id) => {
-        const p = playerRef.current;
-        if (!p) return;
-        if (id === null) {
-          p.configure('abr.enabled', true);
-          store.setAbrEnabled(true);
-          store.setCurrentQualityId(null);
-          return;
-        }
-        p.configure('abr.enabled', false);
-        store.setAbrEnabled(false);
-        const track = ((p as any).getVariantTracks?.() ?? []).find(
-          (v: any) => v.id === id,
-        );
-        if (track) {
-          try {
-            (p as any).selectVariantTrack(track, true);
-          } catch {
-            /* ignore */
-          }
-        }
-        store.setCurrentQualityId(id);
-      },
-      selectAudioLanguage: (lang) => {
-        const p = playerRef.current;
-        if (!p) return;
-        try {
-          (p as any).selectAudioLanguage(lang);
-        } catch {
-          /* ignore */
-        }
-        store.setCurrentAudioLanguage(lang);
-      },
-      selectTextTrack: (id) => {
-        const p = playerRef.current;
-        if (!p) return;
-        if (id === null) {
-          (p as any).setTextTrackVisibility?.(false);
-          store.setCaptions(false);
-          store.setCurrentTextId(null);
-          return;
-        }
-        const track = ((p as any).getTextTracks?.() ?? []).find(
-          (t: any) => t.id === id,
-        );
-        if (track) {
-          (p as any).selectTextTrack?.(track);
-          (p as any).setTextTrackVisibility?.(true);
-          store.setCaptions(true);
-          store.setCurrentTextId(id);
-        }
-      },
-      toggleCaptions: (on) => {
-        const p = playerRef.current;
-        if (!p) return;
-        if (!on) {
-          controller.selectTextTrack(null);
-          return;
-        }
-        const texts: any[] = (p as any).getTextTracks?.() ?? [];
-        if (texts.length === 0) return;
-        const pref = (navigator.language || 'en').slice(0, 2);
-        const chosen = texts.find((t) => (t.language || '').startsWith(pref)) || texts[0];
-        controller.selectTextTrack(chosen.id);
-      },
-    }),
-    // controller references playerRef (stable) + store setters (stable)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [],
-  );
+  const selectAudioLanguage = useCallback((lang: string) => {
+    const player = playerRef.current as any;
+    if (!player) return;
+    if (typeof player.selectAudioLanguage === 'function') {
+      player.selectAudioLanguage(lang);
+    }
+    store.getState().selectAudioLanguage(lang);
+  }, []);
 
-  return controller;
+  const selectTextTrack = useCallback((id: number | null) => {
+    const player = playerRef.current as any;
+    if (!player) return;
+    if (id === null) {
+      if (typeof player.setTextTrackVisibility === 'function') {
+        player.setTextTrackVisibility(false);
+      }
+      store.getState().selectTextTrack(null);
+    } else {
+      const tracks = player.getTextTracks();
+      const target = tracks.find((t: any) => t.id === id);
+      if (target) player.selectTextTrack(target);
+      if (typeof player.setTextTrackVisibility === 'function') {
+        player.setTextTrackVisibility(true);
+      }
+      store.getState().selectTextTrack(id);
+    }
+  }, []);
+
+  const toggleCaptions = useCallback((enabled: boolean) => {
+    const player = playerRef.current as any;
+    if (!player) return;
+    if (typeof player.setTextTrackVisibility === 'function') {
+      player.setTextTrackVisibility(enabled);
+    }
+    store.getState().setCaptionsEnabled(enabled);
+  }, []);
+
+  return { playerRef, selectQuality, selectAudioLanguage, selectTextTrack, toggleCaptions };
+}
+
+// ── Helper functions (called only on events, not hot path) ──
+
+function updateQualities(player: shaka.Player) {
+  try {
+    const tracks = player.getVariantTracks();
+    if (!tracks.length) return;
+
+    // Each variant track in Shaka is a unique video+audio combo.
+    // We want to show every distinct resolution+bandwidth from the stream — no fakes.
+    const qualities: QualityLevel[] = [];
+    const seen = new Set<string>();
+
+    for (const t of tracks) {
+      // Build a unique key: height + bandwidth (same height can have different bitrates)
+      const h = t.height || 0;
+      const w = t.width || 0;
+      const bw = t.bandwidth || 0;
+      const key = `${h}_${w}_${bw}`;
+
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      // Build a descriptive label from actual stream data
+      let label = '';
+      if (h > 0) {
+        label = `${h}p`;
+        if (t.frameRate && t.frameRate > 30) {
+          label += `${Math.round(t.frameRate)}`;  // e.g. "1080p60"
+        }
+      } else if (bw > 0) {
+        // Audio-only variant — no video height
+        label = `${Math.round(bw / 1000)} kbps`;
+      } else {
+        label = `Variant ${t.id}`;
+      }
+
+      // Extract codecs from the variant
+      const videoCodec = t.videoCodec || undefined;
+      const audioCodec = t.audioCodec || undefined;
+      const channelsCount = (t as any).channelsCount || (t as any).audioChannelsCount || undefined;
+      const audioSampleRate = (t as any).audioSamplingRate || (t as any).audioSampleRate || undefined;
+      const frameRate = t.frameRate || undefined;
+
+      qualities.push({
+        id: t.id,
+        label,
+        height: h,
+        width: w,
+        bandwidth: bw,
+        frameRate,
+        videoCodec,
+        audioCodec,
+        channelsCount,
+        audioSampleRate,
+        active: !!t.active,
+      });
+    }
+
+    // Sort: highest resolution first, then by bandwidth desc
+    qualities.sort((a, b) => {
+      if (a.height !== b.height) return b.height - a.height;
+      return b.bandwidth - a.bandwidth;
+    });
+
+    usePlayerStore.getState().setQualities(qualities);
+  } catch { /* ignore */ }
+}
+
+function updateAudioTracks(player: shaka.Player) {
+  try {
+    const tracks = player.getVariantTracks();
+    const seen = new Set<string>();
+    const audioTracks: AudioTrack[] = [];
+    for (const t of tracks) {
+      const lang = t.language || 'und';
+      if (!seen.has(lang)) {
+        seen.add(lang);
+        audioTracks.push({
+          id: t.id,
+          language: lang,
+          label: t.label || getLanguageName(lang),
+        });
+      }
+    }
+    usePlayerStore.getState().setAudioTracks(audioTracks);
+  } catch { /* ignore */ }
+}
+
+function updateTextTracks(player: shaka.Player) {
+  try {
+    const tracks = player.getTextTracks();
+    const textTracks: TextTrack[] = tracks.map((t) => ({
+      id: t.id,
+      language: t.language || 'und',
+      label: t.label || getLanguageName(t.language || 'und'),
+    }));
+    usePlayerStore.getState().setTextTracks(textTracks);
+  } catch { /* ignore */ }
 }

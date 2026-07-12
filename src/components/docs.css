@@ -1,0 +1,384 @@
+/* ═══════════════════════════════════════
+   OmniStream — Docs & Embed Page
+   ═══════════════════════════════════════ */
+
+.doc-container {
+  min-height: 100vh;
+  background: #09090b;
+  color: #f0f0f0;
+  font-family: 'Inter', system-ui, sans-serif;
+}
+
+/* ── Hero ── */
+.doc-hero {
+  padding: 56px 24px 40px;
+  background: linear-gradient(180deg, rgba(239,68,68,0.06) 0%, #09090b 100%);
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+}
+.doc-hero-inner {
+  max-width: 780px;
+  margin: 0 auto;
+  text-align: center;
+}
+.doc-top-row {
+  margin-bottom: 12px;
+}
+.doc-back-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 7px 16px;
+  border-radius: 8px;
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.08);
+  color: rgba(255,255,255,0.5);
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.12s;
+}
+.doc-back-btn:hover {
+  background: rgba(255,255,255,0.12);
+  color: #fff;
+}
+
+/* Host input */
+.doc-host-input {
+  margin-bottom: 8px;
+}
+.doc-host-input input {
+  width: 100%;
+  padding: 12px 16px;
+  border-radius: 10px;
+  background: #111113;
+  border: 1px solid rgba(255,255,255,0.08);
+  color: #ef4444;
+  font-size: 0.88rem;
+  font-family: 'SF Mono', ui-monospace, Menlo, Consolas, monospace;
+  font-weight: 600;
+  outline: none;
+  transition: border-color 0.15s;
+}
+.doc-host-input input:focus {
+  border-color: #ef4444;
+}
+.doc-host-input input::placeholder {
+  color: rgba(255,255,255,0.2);
+}
+
+.doc-text code {
+  background: rgba(255,255,255,0.06);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 0.82rem;
+  font-family: 'SF Mono', ui-monospace, Menlo, Consolas, monospace;
+  color: #ef4444;
+}
+.doc-logo {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 20px;
+}
+.doc-logo-icon {
+  width: 40px; height: 40px;
+  display: grid;
+  place-items: center;
+  border-radius: 10px;
+  background: #ef4444;
+  color: #fff;
+}
+.doc-logo-mark {
+  font-size: 1rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  color: #ef4444;
+}
+.doc-logo-stream {
+  font-size: 1rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: rgba(255,255,255,0.7);
+}
+.doc-headline {
+  font-size: 2.2rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  margin: 0 0 12px;
+  background: linear-gradient(135deg, #fff 0%, rgba(255,255,255,0.65) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+.doc-sub {
+  font-size: 1rem;
+  color: rgba(255,255,255,0.45);
+  margin: 0;
+  line-height: 1.6;
+}
+
+/* ── Sections ── */
+.doc-section {
+  max-width: 780px;
+  margin: 0 auto;
+  padding: 32px 24px;
+}
+.doc-section + .doc-section {
+  border-top: 1px solid rgba(255,255,255,0.05);
+}
+.doc-section-title {
+  font-size: 1.15rem;
+  font-weight: 700;
+  margin: 0 0 16px;
+  color: #fff;
+}
+.doc-text {
+  font-size: 0.9rem;
+  color: rgba(255,255,255,0.5);
+  margin: 0 0 16px;
+  line-height: 1.6;
+}
+
+/* ── Version tabs ── */
+.doc-tabs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 20px;
+}
+.doc-tab {
+  padding: 10px 20px;
+  border-radius: 10px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.06);
+  color: rgba(255,255,255,0.45);
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.doc-tab:hover {
+  background: rgba(255,255,255,0.08);
+  color: rgba(255,255,255,0.7);
+}
+.doc-tab.active {
+  background: #ef4444;
+  border-color: #ef4444;
+  color: #fff;
+}
+
+/* ── Version card ── */
+.doc-version-card {
+  background: rgba(255,255,255,0.02);
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 16px;
+  padding: 24px;
+  margin-bottom: 24px;
+}
+.doc-version-info h2 {
+  margin: 0 0 8px;
+  font-size: 1.2rem;
+  font-weight: 700;
+}
+.doc-version-info p {
+  margin: 0 0 16px;
+  font-size: 0.88rem;
+  color: rgba(255,255,255,0.5);
+  line-height: 1.5;
+}
+.doc-features {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 18px;
+}
+.doc-feature-tag {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: rgba(255,255,255,0.55);
+  background: rgba(255,255,255,0.05);
+  border: 1px solid rgba(255,255,255,0.06);
+  padding: 4px 10px;
+  border-radius: 6px;
+}
+.doc-demo-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 11px 24px;
+  border-radius: 10px;
+  background: #ef4444;
+  color: #fff;
+  border: none;
+  font-size: 0.88rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform 0.15s, opacity 0.15s;
+}
+.doc-demo-btn:hover {
+  transform: scale(1.03);
+}
+
+/* ── Code block ── */
+.doc-code-block {
+  background: #111113;
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 12px;
+  overflow: hidden;
+  margin-bottom: 16px;
+}
+.doc-code-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 14px;
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+}
+.doc-code-lang {
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: rgba(255,255,255,0.3);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.doc-copy-btn {
+  padding: 4px 12px;
+  border-radius: 6px;
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.08);
+  color: rgba(255,255,255,0.5);
+  font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.12s;
+}
+.doc-copy-btn:hover {
+  background: rgba(255,255,255,0.12);
+  color: #fff;
+}
+.doc-code {
+  margin: 0;
+  padding: 16px;
+  overflow-x: auto;
+  font-family: 'SF Mono', ui-monospace, Menlo, Consolas, monospace;
+  font-size: 0.78rem;
+  line-height: 1.6;
+  color: rgba(255,255,255,0.7);
+  -webkit-overflow-scrolling: touch;
+}
+.doc-code::-webkit-scrollbar { height: 4px; }
+.doc-code::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 2px; }
+
+/* ── API Table ── */
+.doc-api-table {
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 12px;
+  overflow: hidden;
+}
+.doc-api-row {
+  display: flex;
+  align-items: baseline;
+  gap: 16px;
+  padding: 12px 16px;
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+}
+.doc-api-row:last-child { border-bottom: none; }
+.doc-api-method {
+  font-family: 'SF Mono', ui-monospace, Menlo, Consolas, monospace;
+  font-size: 0.76rem;
+  font-weight: 600;
+  color: #ef4444;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.doc-api-desc {
+  font-size: 0.82rem;
+  color: rgba(255,255,255,0.5);
+}
+
+/* ── Platform grid ── */
+.doc-platform-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+  gap: 8px;
+}
+.doc-platform-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 16px 8px;
+  border-radius: 12px;
+  background: rgba(255,255,255,0.02);
+  border: 1px solid rgba(255,255,255,0.05);
+  text-align: center;
+}
+.doc-platform-icon { font-size: 1.4rem; }
+.doc-platform-name {
+  font-size: 0.76rem;
+  font-weight: 600;
+  color: rgba(255,255,255,0.75);
+}
+.doc-platform-min {
+  font-size: 0.65rem;
+  color: rgba(255,255,255,0.3);
+  font-weight: 600;
+}
+
+/* ── Footer ── */
+.doc-footer {
+  padding: 24px;
+  border-top: 1px solid rgba(255,255,255,0.05);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  font-size: 0.74rem;
+  color: rgba(255,255,255,0.25);
+  max-width: 780px;
+  margin: 0 auto;
+}
+.doc-footer-brand {
+  display: flex;
+  align-items: baseline;
+  gap: 2px;
+}
+.doc-footer .doc-logo-mark,
+.doc-footer .doc-logo-stream { font-size: 0.74rem; }
+
+/* ── Comparison table ── */
+.doc-compare-row {
+  display: grid !important;
+  grid-template-columns: 1.5fr 1fr 1fr 1fr;
+  gap: 8px;
+  align-items: center;
+}
+.doc-compare-header {
+  order: -1;
+  background: rgba(255,255,255,0.03);
+}
+.doc-compare-feature {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: rgba(255,255,255,0.7);
+}
+.doc-compare-val {
+  font-size: 0.78rem;
+  color: rgba(255,255,255,0.45);
+  text-align: center;
+}
+.doc-compare-header .doc-compare-feature,
+.doc-compare-header .doc-compare-val {
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: rgba(255,255,255,0.35);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+/* ── Responsive ── */
+@media (max-width: 640px) {
+  .doc-headline { font-size: 1.6rem; }
+  .doc-tabs { flex-wrap: wrap; }
+  .doc-api-row { flex-direction: column; gap: 4px; }
+  .doc-platform-grid { grid-template-columns: repeat(3, 1fr); }
+}
